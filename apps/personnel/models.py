@@ -82,8 +82,6 @@ class Personnel(models.Model):
         "organization.Rank",
         on_delete=models.PROTECT,
         related_name="personnel",
-        null=True,
-        blank=True,
         verbose_name="Grado",
     )
 
@@ -91,8 +89,6 @@ class Personnel(models.Model):
         "organization.Position",
         on_delete=models.PROTECT,
         related_name="personnel",
-        null=True,
-        blank=True,
         verbose_name="Cargo",
     )
 
@@ -100,8 +96,6 @@ class Personnel(models.Model):
         "organization.Unit",
         on_delete=models.PROTECT,
         related_name="personnel",
-        null=True,
-        blank=True,
         verbose_name="Unidad",
     )
 
@@ -234,7 +228,63 @@ class Personnel(models.Model):
 
     def clean(self):
         errors = {}
+        # ---------------------------------------------------------
+        # Validación de datos militares obligatorios
+        # ---------------------------------------------------------
 
+        if not self.rank_id:
+            errors["rank"] = (
+                "Debe registrar el grado del personal."
+            )
+
+        if not self.position_id:
+            errors["position"] = (
+                "Debe registrar el cargo del personal."
+            )
+
+        if not self.unit_id:
+            errors["unit"] = (
+                "Debe registrar la unidad del personal."
+            )
+
+        # ---------------------------------------------------------
+        # Catálogos activos
+        # ---------------------------------------------------------
+
+        if (
+            self.rank_id
+            and not self.rank.is_active
+        ):
+            errors["rank"] = (
+                "El grado seleccionado se encuentra inactivo."
+            )
+
+        if (
+            self.position_id
+            and not self.position.is_active
+        ):
+            errors["position"] = (
+                "El cargo seleccionado se encuentra inactivo."
+            )
+
+        if (
+            self.unit_id
+            and not self.unit.is_active
+        ):
+            errors["unit"] = (
+                "La unidad seleccionada se encuentra inactiva."
+            )
+
+        if (
+            self.section_id
+            and not self.section.is_active
+        ):
+            errors["section"] = (
+                "La sección seleccionada se encuentra inactiva."
+            )
+
+
+        
         # Normalización del CI
         self.identity_card_number = (
             self.identity_card_number.strip().upper()
@@ -306,9 +356,15 @@ class Personnel(models.Model):
             raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
+        # ---------------------------------------------------------
+        # Normalización
+        # ---------------------------------------------------------
+
         self.tin = self.tin.strip().upper()
 
-        self.first_name = self.first_name.strip().upper()
+        self.first_name = (
+            self.first_name.strip().upper()
+        )
 
         self.paternal_last_name = (
             self.paternal_last_name.strip().upper()
@@ -319,6 +375,16 @@ class Personnel(models.Model):
             if self.maternal_last_name
             else ""
         )
+
+        # ---------------------------------------------------------
+        # Validación completa del modelo
+        # ---------------------------------------------------------
+
+        self.full_clean()
+
+        # ---------------------------------------------------------
+        # Persistencia
+        # ---------------------------------------------------------
 
         super().save(*args, **kwargs)
 

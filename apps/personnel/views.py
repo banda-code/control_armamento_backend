@@ -177,6 +177,16 @@ class PersonnelViewSet(viewsets.ModelViewSet):
                 "position"
             )
         )
+        section_id = (
+            self.request.query_params.get(
+                "section"
+            )
+        )
+        has_user_account = (
+            self.request.query_params.get(
+                "has_user_account"
+            )
+        )
 
         # Personal activo / inactivo
         if is_active is not None:
@@ -236,6 +246,46 @@ class PersonnelViewSet(viewsets.ModelViewSet):
                     position_id=position_id
                 )
             )
+        if section_id:
+            scoped_queryset = (
+                scoped_queryset.filter(
+                    section_id=section_id
+                )
+            )
+        # -----------------------------------------------------
+        # Personal con / sin cuenta de usuario
+        # -----------------------------------------------------
+
+        if has_user_account is not None:
+            normalized = (
+                str(has_user_account)
+                .strip()
+                .lower()
+            )
+
+            if normalized in {
+                "true",
+                "1",
+                "yes",
+                "si",
+                "sí",
+            }:
+                scoped_queryset = (
+                    scoped_queryset.filter(
+                        user_account__isnull=False
+                    )
+                )
+
+            elif normalized in {
+                "false",
+                "0",
+                "no",
+            }:
+                scoped_queryset = (
+                    scoped_queryset.filter(
+                        user_account__isnull=True
+                    )
+                )
 
         return scoped_queryset
 

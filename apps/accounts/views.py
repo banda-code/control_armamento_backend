@@ -12,7 +12,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from drf_spectacular.utils import extend_schema
-from rest_framework import status, viewsets
+from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -597,6 +597,110 @@ class UserViewSet(viewsets.ModelViewSet):
         "head",
         "options",
     ]
+    # ---------------------------------------------------------
+    # Búsqueda y ordenamiento
+    # ---------------------------------------------------------
+
+    filter_backends = [
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+
+    search_fields = [
+        "email",
+        "role",
+        "personnel__tin",
+        "personnel__identity_card_number",
+        "personnel__first_name",
+        "personnel__paternal_last_name",
+        "personnel__maternal_last_name",
+        "personnel__rank__name",
+        "personnel__rank__abbreviation",
+        "personnel__position__name",
+        "personnel__unit__name",
+        "personnel__section__name",
+    ]
+
+    ordering_fields = [
+        "email",
+        "role",
+        "is_active",
+        "last_login",
+        "created_at",
+        "updated_at",
+        "personnel__paternal_last_name",
+        "personnel__first_name",
+    ]
+
+    ordering = [
+        "personnel__paternal_last_name",
+        "personnel__maternal_last_name",
+        "personnel__first_name",
+    ]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        if getattr(
+            self,
+            "swagger_fake_view",
+            False,
+        ):
+            return queryset
+
+        # -----------------------------------------------------
+        # Filtro por estado
+        # -----------------------------------------------------
+
+        is_active = (
+            self.request.query_params.get(
+                "is_active"
+            )
+        )
+
+        if is_active is not None:
+            normalized = (
+                str(is_active)
+                .strip()
+                .lower()
+            )
+
+            if normalized in {
+                "true",
+                "1",
+                "yes",
+                "si",
+                "sí",
+            }:
+                queryset = queryset.filter(
+                    is_active=True
+                )
+
+            elif normalized in {
+                "false",
+                "0",
+                "no",
+            }:
+                queryset = queryset.filter(
+                    is_active=False
+                )
+
+        # -----------------------------------------------------
+        # Filtro por rol
+        # -----------------------------------------------------
+
+        role = (
+            self.request.query_params.get(
+                "role"
+            )
+        )
+
+        if role:
+            queryset = queryset.filter(
+                role=role
+            )
+
+        return queryset
 
     def get_serializer_class(self):
         if self.action == "create":
