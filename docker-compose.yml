@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: armamento_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-control_armamento}
+      POSTGRES_USER: ${DB_USER:-armamento_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cambie-esta-clave}
+    volumes:
+      - armamento_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-armamento_user} -d ${DB_NAME:-control_armamento}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: .
+    container_name: armamento_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+    command: >
+      sh -c "
+      python manage.py migrate &&
+      python manage.py runserver 0.0.0.0:8000
+      "
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  armamento_postgres_data:
