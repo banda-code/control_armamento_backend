@@ -2,6 +2,9 @@ from rest_framework import (
     filters,
     viewsets,
 )
+from apps.accounts.scopes import (
+    get_user_unit_id,
+)
 from rest_framework.exceptions import (
     PermissionDenied,
 )
@@ -124,11 +127,7 @@ class UnitScopedViewSet(
         }:
             return queryset
 
-        unit_id = getattr(
-            user,
-            "unit_id",
-            None,
-        )
+        unit_id = get_user_unit_id(user)
 
         if not unit_id:
             return queryset.none()
@@ -509,10 +508,89 @@ class StockBatchViewSet(
         "created_at",
     ]
 
-    def perform_create(self, serializer):
-        unit = serializer.validated_data[
-            "unit"
-        ]
+    # =====================================================
+    # FILTROS
+    # =====================================================
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        stock_material_id = (
+            self.request.query_params.get(
+                "stock_material"
+            )
+        )
+
+        unit_id = (
+            self.request.query_params.get(
+                "unit"
+            )
+        )
+
+        armory_id = (
+            self.request.query_params.get(
+                "armory"
+            )
+        )
+
+        status_value = (
+            self.request.query_params.get(
+                "status"
+            )
+        )
+
+        is_active = (
+            self.request.query_params.get(
+                "is_active"
+            )
+        )
+
+        if stock_material_id:
+            queryset = queryset.filter(
+                stock_material_id=
+                stock_material_id
+            )
+
+        if unit_id:
+            queryset = queryset.filter(
+                unit_id=unit_id
+            )
+
+        if armory_id:
+            queryset = queryset.filter(
+                armory_id=armory_id
+            )
+
+        if status_value:
+            queryset = queryset.filter(
+                status=status_value
+            )
+
+        if is_active in (
+            "true",
+            "false",
+        ):
+            queryset = queryset.filter(
+                is_active=(
+                    is_active == "true"
+                )
+            )
+
+        return queryset
+
+    # =====================================================
+    # CREAR
+    # =====================================================
+
+    def perform_create(
+        self,
+        serializer,
+    ):
+        unit = (
+            serializer.validated_data[
+                "unit"
+            ]
+        )
 
         self.ensure_unit_write_access(
             unit.id
@@ -523,10 +601,19 @@ class StockBatchViewSet(
             updated_by=self.request.user,
         )
 
-    def perform_update(self, serializer):
-        unit = serializer.validated_data.get(
-            "unit",
-            serializer.instance.unit,
+    # =====================================================
+    # ACTUALIZAR
+    # =====================================================
+
+    def perform_update(
+        self,
+        serializer,
+    ):
+        unit = (
+            serializer.validated_data.get(
+                "unit",
+                serializer.instance.unit,
+            )
         )
 
         self.ensure_unit_write_access(
@@ -569,6 +656,23 @@ class SerializedMaterialComponentViewSet(
         "quantity",
         "created_at",
     ]
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        material_id = self.request.query_params.get("material")
+        is_active = self.request.query_params.get("is_active")
+
+        if material_id:
+            queryset = queryset.filter(
+                material_id=material_id
+            )
+
+        if is_active in ("true", "false"):
+            queryset = queryset.filter(
+                is_active=(is_active == "true")
+            )
+
+        return queryset
 
     def perform_create(self, serializer):
         material = serializer.validated_data[
