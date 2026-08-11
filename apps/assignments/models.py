@@ -12,6 +12,18 @@ class AssignmentStatus(models.TextChoices):
     ACTIVE = "ACTIVE", "Dotación activa"
     RETURNED = "RETURNED", "Devuelto"
 
+class AssignmentPhotoMoment(models.TextChoices):
+    DELIVERY = "DELIVERY", "Entrega"
+    RETURN = "RETURN", "Devolución"
+
+
+class AssignmentPhotoType(models.TextChoices):
+    GENERAL = "GENERAL", "Vista general"
+    SERIAL = "SERIAL", "Número de identificación o serie"
+    LEFT_SIDE = "LEFT_SIDE", "Lado izquierdo"
+    RIGHT_SIDE = "RIGHT_SIDE", "Lado derecho"
+    COMPONENTS = "COMPONENTS", "Componentes"
+    OTHER = "OTHER", "Otra fotografía"
 
 class IndividualAssignment(models.Model):
     """
@@ -150,15 +162,11 @@ class IndividualAssignment(models.Model):
 
         constraints = [
             # Un material serializado solamente puede
-            # tener una dotación activa al mismo tiempo.
+            # tener una dotación en toda su vida útil.
+            # No puede ser reasignado a otra persona.
             models.UniqueConstraint(
-                fields=[
-                    "material",
-                ],
-                condition=models.Q(
-                    status=AssignmentStatus.ACTIVE
-                ),
-                name="unique_active_assignment_material",
+                fields=["material"],
+                name="unique_assignment_material_lifetime",
             ),
         ]
 
@@ -431,4 +439,79 @@ class IndividualAssignmentComponent(models.Model):
             f"{self.component.component_type.name} "
             f"x {self.quantity_delivered} - "
             f"{self.assignment.material.institutional_code}"
+        )
+
+class IndividualAssignmentPhoto(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    assignment = models.ForeignKey(
+        IndividualAssignment,
+        on_delete=models.CASCADE,
+        related_name="photos",
+        verbose_name="Dotación individual",
+    )
+
+    moment = models.CharField(
+        max_length=20,
+        choices=AssignmentPhotoMoment.choices,
+        verbose_name="Momento de la fotografía",
+    )
+
+    photo_type = models.CharField(
+        max_length=20,
+        choices=AssignmentPhotoType.choices,
+        default=AssignmentPhotoType.GENERAL,
+        verbose_name="Tipo de fotografía",
+    )
+
+    photo = models.ImageField(
+        upload_to="assignments/photos/%Y/%m/",
+        verbose_name="Fotografía",
+    )
+
+    description = models.CharField(
+        max_length=250,
+        blank=True,
+        verbose_name="Descripción",
+    )
+
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="individual_assignment_photos_uploaded",
+        verbose_name="Registrado por",
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha de registro",
+    )
+
+    class Meta:
+        verbose_name = "Fotografía de dotación individual"
+        verbose_name_plural = "Fotografías de dotaciones individuales"
+        ordering = [
+            "moment",
+            "photo_type",
+            "created_at",
+        ]
+        indexes = [
+            models.Index(
+                fields=[
+                    "assignment",
+                    "moment",
+                ],
+                name="assign_photo_moment_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.assignment.material.institutional_code} - "
+            f"{self.get_moment_display()} - "
+            f"{self.get_photo_type_display()}"
         )

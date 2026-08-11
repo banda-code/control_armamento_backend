@@ -15,9 +15,12 @@ from apps.inventory.models import (
 from apps.personnel.models import Personnel
 
 from .models import (
+    AssignmentPhotoMoment,
+    AssignmentPhotoType,
     AssignmentStatus,
     IndividualAssignment,
     IndividualAssignmentComponent,
+    IndividualAssignmentPhoto,
 )
 
 
@@ -294,6 +297,23 @@ class IndividualAssignmentCreateSerializer(
     def validate(self, attrs):
         personnel = attrs["personnel"]
         material = attrs["material"]
+        # -----------------------------------------------------
+        # El material solamente puede pertenecer
+        # a un personal durante toda su vida útil.
+        # -----------------------------------------------------
+
+        if IndividualAssignment.objects.filter(
+            material=material,
+        ).exists():
+            raise serializers.ValidationError(
+                {
+                    "material": (
+                        "Este material ya se encuentra vinculado "
+                        "a un personal y no puede ser reasignado."
+                    )
+                }
+            )
+
         components = attrs.get(
             "components",
             [],
@@ -513,15 +533,23 @@ class IndividualAssignmentCreateSerializer(
                 }
             )
 
+        # -----------------------------------------------------
+        # Regla permanente de dotación.
+        #
+        # Aunque una dotación anterior se encuentre RETURNED,
+        # el material no puede asignarse a otra persona.
+        # Esta comprobación se repite después del
+        # select_for_update() para evitar condiciones de carrera.
+        # -----------------------------------------------------
+
         if IndividualAssignment.objects.filter(
             material=material,
-            status=AssignmentStatus.ACTIVE,
         ).exists():
             raise serializers.ValidationError(
                 {
                     "material": (
-                        "El material ya posee una "
-                        "dotación activa."
+                        "Este material ya se encuentra vinculado "
+                        "a un personal y no puede ser reasignado."
                     )
                 }
             )
@@ -763,3 +791,109 @@ class IndividualAssignmentReturnSerializer(
             instance,
             context=self.context,
         ).data
+
+
+class IndividualAssignmentPhotoSerializer(
+    serializers.ModelSerializer
+):
+    moment_display = serializers.CharField(
+        source="get_moment_display",
+        read_only=True,
+    )
+
+    photo_type_display = serializers.CharField(
+        source="get_photo_type_display",
+        read_only=True,
+    )
+
+    uploaded_by_email = serializers.CharField(
+        source="uploaded_by.email",
+        read_only=True,
+    )
+
+    class Meta:
+        model = IndividualAssignmentPhoto
+
+        fields = [
+            "id",
+            "assignment",
+
+            "moment",
+            "moment_display",
+
+            "photo_type",
+            "photo_type_display",
+
+            "photo",
+            "description",
+
+            "uploaded_by",
+            "uploaded_by_email",
+
+            "created_at",
+        ]
+
+        read_only_fields = [
+            "id",
+            "assignment",
+            "uploaded_by",
+            "uploaded_by_email",
+            "moment_display",
+            "photo_type_display",
+            "created_at",
+        ]
+
+    def validate(self, attrs):
+        assignment = self.context.get(
+            "assignment"
+        )
+
+        moment = attrs.get(
+            "moment"
+        )
+
+        if not assignment:
+            raise serializers.ValidationError(
+                {
+                    "assignment": (
+                        "No se pudo determinar "
+                        "la dotación individual."
+                    )
+                }
+            )
+
+        # ---------------------------------------------
+        # Fotografía de devolución
+        # ---------------------------------------------
+
+        if (
+            moment == AssignmentPhotoMoment.RETURN
+            and assignment.status
+            != AssignmentStatus.RETURNED
+        ):
+            raise serializers.ValidationError(
+                {
+                    "moment": (
+                        "Las fotografías de devolución "
+                        "solo pueden registrarse después "
+                        "de devolver la dotación."
+                    )
+                }
+            )
+
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context[
+            "request"
+        ]
+
+        assignment = self.context[
+            "assignment"
+        ]
+
+        return IndividualAssignmentPhoto.objects.create(
+            assignment=assignment,
+            uploaded_by=request.user,
+            **validated_data,
+        )
