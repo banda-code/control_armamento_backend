@@ -1,6 +1,7 @@
 from django.core.exceptions import (
     ValidationError as DjangoValidationError,
 )
+from django.db import transaction
 from rest_framework import serializers
 
 from apps.inventory.models import (
@@ -15,7 +16,10 @@ from apps.inventory.models import (
     SerializedMaterial,
     SerializedMaterialComponent,
     StockBatch,
+    StockBatchStatus,
     StockMaterial,
+    StockMovement,
+    StockMovementType,
     UnitOfMeasure,
 )
 
@@ -492,6 +496,42 @@ class StockBatchSerializer(
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        # =====================================================
+        # PROTEGER CANTIDADES DESPUÉS DE CREAR EL LOTE
+        # =====================================================
+
+        if self.instance:
+            if (
+                "initial_quantity" in attrs
+                and attrs["initial_quantity"]
+                != self.instance.initial_quantity
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "initial_quantity": (
+                            "La cantidad inicial no puede "
+                            "modificarse después de crear "
+                            "el lote. Utilice movimientos "
+                            "de existencias."
+                        )
+                    }
+                )
+
+            if (
+                "current_quantity" in attrs
+                and attrs["current_quantity"]
+                != self.instance.current_quantity
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "current_quantity": (
+                            "La cantidad actual no puede "
+                            "modificarse manualmente. "
+                            "Utilice movimientos de "
+                            "existencias."
+                        )
+                    }
+                )
 
         stock_material = attrs.get(
             "stock_material"
@@ -567,6 +607,398 @@ class StockBatchSerializer(
 
         return attrs
 
+
+# =========================================================
+# MOVIMIENTOS DE EXISTENCIAS
+# =========================================================
+
+
+class StockMovementSerializer(
+    serializers.ModelSerializer
+):
+    stock_material_code = serializers.CharField(
+        source="batch.stock_material.internal_code",
+        read_only=True,
+    )
+
+    specification_name = serializers.CharField(
+        source="batch.stock_material.specification.name",
+        read_only=True,
+    )
+
+    lot_number = serializers.CharField(
+        source="batch.lot_number",
+        read_only=True,
+    )
+
+    unit_name = serializers.CharField(
+        source="unit.name",
+        read_only=True,
+    )
+
+    armory_name = serializers.CharField(
+        source="armory.name",
+        read_only=True,
+    )
+
+    unit_of_measure_name = serializers.CharField(
+        source=(
+            "batch.stock_material."
+            "unit_of_measure.name"
+        ),
+        read_only=True,
+    )
+
+    unit_of_measure_symbol = serializers.CharField(
+        source=(
+            "batch.stock_material."
+            "unit_of_measure.symbol"
+        ),
+        read_only=True,
+    )
+
+    movement_type_display = serializers.CharField(
+        source="get_movement_type_display",
+        read_only=True,
+    )
+
+    class Meta:
+        model = StockMovement
+
+        fields = "__all__"
+
+        read_only_fields = (
+            "id",
+            "previous_quantity",
+            "new_quantity",
+            "unit",
+            "armory",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate(self, attrs):
+        batch = attrs.get(
+            "batch"
+        )
+
+        quantity = attrs.get(
+            "quantity"
+        )
+
+        if not batch:
+            raise serializers.ValidationError(
+                {
+                    "batch": (
+                        "Debe seleccionar un lote."
+                    )
+                }
+            )
+
+        if quantity is None:
+            raise serializers.ValidationError(
+                {
+                    "quantity": (
+                        "Debe ingresar una cantidad."
+                    )
+                }
+            )
+
+        if quantity <= 0:
+            raise serializers.ValidationError(
+                {
+                    "quantity": (
+                        "La cantidad debe ser mayor a cero."
+                    )
+                }
+            )
+
+        if not batch.is_active:
+            raise serializers.ValidationError(
+                {
+                    "batch": (
+                        "No se pueden registrar "
+                        "movimientos sobre un lote "
+                        "inactivo."
+                    )
+                }
+            )
+
+        if (
+            batch.status ==
+            StockBatchStatus.DISCHARGED
+        ):
+            raise serializers.ValidationError(
+                {
+                    "batch": (
+                        "No se pueden registrar "
+                        "movimientos sobre un lote "
+                        "dado de baja."
+                    )
+                }
+            )
+
+        unit_of_measure = (
+            batch
+            .stock_material
+            .unit_of_measure
+        )
+
+        if (
+            not unit_of_measure.allows_decimals
+            and quantity
+            != quantity.to_integral_value()
+        ):
+            raise serializers.ValidationError(
+                {
+                    "quantity": (
+                        "La unidad de medida de este "
+                        "material no permite cantidades "
+                        "decimales."
+                    )
+                }
+            )
+
+        return attrs
+
+    @transaction.atomic
+    def create(
+        self,
+        validated_data,
+    ):
+        created_by = validated_data.pop(
+            "created_by",
+            None,
+        )
+
+        original_batch = (
+            validated_data["batch"]
+        )
+
+        # Bloqueamos el lote mientras se realiza
+        # el movimiento para evitar operaciones
+        # simultáneas sobre la misma existencia.
+        batch = (
+            StockBatch.objects
+            .select_for_update()
+            .select_related(
+                "stock_material",
+                "stock_material__unit_of_measure",
+                "unit",
+                "armory",
+            )
+            .get(
+                pk=original_batch.pk
+            )
+        )
+
+        if not batch.is_active:
+            raise serializers.ValidationError(
+                {
+                    "batch": (
+                        "El lote se encuentra inactivo."
+                    )
+                }
+            )
+
+        if (
+            batch.status ==
+            StockBatchStatus.DISCHARGED
+        ):
+            raise serializers.ValidationError(
+                {
+                    "batch": (
+                        "El lote se encuentra dado "
+                        "de baja."
+                    )
+                }
+            )
+
+        movement_type = (
+            validated_data[
+                "movement_type"
+            ]
+        )
+
+        quantity = (
+            validated_data[
+                "quantity"
+            ]
+        )
+
+        unit_of_measure = (
+            batch
+            .stock_material
+            .unit_of_measure
+        )
+
+        if (
+            not unit_of_measure.allows_decimals
+            and quantity
+            != quantity.to_integral_value()
+        ):
+            raise serializers.ValidationError(
+                {
+                    "quantity": (
+                        "Este material no permite "
+                        "cantidades decimales."
+                    )
+                }
+            )
+
+        previous_quantity = (
+            batch.current_quantity
+        )
+
+        # -------------------------------------------------
+        # SALIDAS
+        # -------------------------------------------------
+
+        if movement_type in (
+            StockMovementType.OUT,
+            StockMovementType.ADJUSTMENT_OUT,
+        ):
+            new_quantity = (
+                previous_quantity -
+                quantity
+            )
+
+            if new_quantity < 0:
+                raise serializers.ValidationError(
+                    {
+                        "quantity": (
+                            "La cantidad solicitada "
+                            "supera la existencia "
+                            "actual del lote."
+                        )
+                    }
+                )
+
+        # -------------------------------------------------
+        # DEVOLUCIONES / AJUSTES POSITIVOS
+        # -------------------------------------------------
+
+        elif movement_type in (
+            StockMovementType.RETURN,
+            StockMovementType.ADJUSTMENT_IN,
+        ):
+            new_quantity = (
+                previous_quantity +
+                quantity
+            )
+
+            if (
+                new_quantity >
+                batch.initial_quantity
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "quantity": (
+                            "La operación superaría "
+                            "la cantidad inicial del "
+                            "lote. Para una nueva "
+                            "recepción física debe "
+                            "registrarse un nuevo lote."
+                        )
+                    }
+                )
+
+        else:
+            raise serializers.ValidationError(
+                {
+                    "movement_type": (
+                        "Tipo de movimiento no válido."
+                    )
+                }
+            )
+
+        # -------------------------------------------------
+        # CREAR HISTORIAL
+        # -------------------------------------------------
+
+        movement = (
+            StockMovement.objects.create(
+                batch=batch,
+
+                movement_type=
+                    movement_type,
+
+                quantity=
+                    quantity,
+
+                previous_quantity=
+                    previous_quantity,
+
+                new_quantity=
+                    new_quantity,
+
+                unit=
+                    batch.unit,
+
+                armory=
+                    batch.armory,
+
+                reason=
+                    validated_data[
+                        "reason"
+                    ],
+
+                reference_document=
+                    validated_data.get(
+                        "reference_document",
+                        "",
+                    ),
+
+                observations=
+                    validated_data.get(
+                        "observations",
+                        "",
+                    ),
+
+                created_by=
+                    created_by,
+            )
+        )
+
+        # -------------------------------------------------
+        # ACTUALIZAR EXISTENCIA
+        # -------------------------------------------------
+
+        batch.current_quantity = (
+            new_quantity
+        )
+
+        # Si una salida deja el lote en cero,
+        # pasa automáticamente a agotado.
+        if (
+            new_quantity == 0
+            and batch.status ==
+            StockBatchStatus.AVAILABLE
+        ):
+            batch.status = (
+                StockBatchStatus.DEPLETED
+            )
+
+        # Si estaba agotado y recibe una devolución,
+        # vuelve a estar disponible.
+        elif (
+            new_quantity > 0
+            and batch.status ==
+            StockBatchStatus.DEPLETED
+        ):
+            batch.status = (
+                StockBatchStatus.AVAILABLE
+            )
+
+        if created_by:
+            batch.updated_by = (
+                created_by
+            )
+
+        batch.save()
+
+        return movement
 
 class ComponentTypeSerializer(
     CleanModelSerializer

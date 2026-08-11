@@ -16,6 +16,7 @@ from apps.inventory.views import (
     SerializedMaterialViewSet,
     StockBatchViewSet,
     StockMaterialViewSet,
+    StockMovementViewSet,
     UnitOfMeasureViewSet,
 )
 
@@ -90,6 +91,12 @@ router.register(
     "stock-batches",
     StockBatchViewSet,
     basename="stock-batch",
+)
+
+router.register(
+    "stock-movements",
+    StockMovementViewSet,
+    basename="stock-movement",
 )
 
 router.register(

@@ -859,6 +859,177 @@ class StockBatch(TimeStampedModel):
         lot = self.lot_number or "SIN LOTE"
         return f"{self.stock_material} - {lot}"
 
+# =========================================================
+# MOVIMIENTOS DE EXISTENCIAS
+# =========================================================
+
+
+class StockMovementType(models.TextChoices):
+    OUT = (
+        "OUT",
+        "Salida",
+    )
+
+    RETURN = (
+        "RETURN",
+        "Devolución / Reintegro",
+    )
+
+    ADJUSTMENT_IN = (
+        "ADJUSTMENT_IN",
+        "Ajuste positivo",
+    )
+
+    ADJUSTMENT_OUT = (
+        "ADJUSTMENT_OUT",
+        "Ajuste negativo",
+    )
+
+
+class StockMovement(TimeStampedModel):
+    """
+    Movimiento que modifica la cantidad actual
+    de un lote de existencia.
+
+    El movimiento conserva la cantidad anterior
+    y posterior para garantizar trazabilidad.
+    """
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    batch = models.ForeignKey(
+        StockBatch,
+        on_delete=models.PROTECT,
+        related_name="movements",
+        verbose_name="Lote",
+    )
+
+    movement_type = models.CharField(
+        max_length=30,
+        choices=StockMovementType.choices,
+        db_index=True,
+        verbose_name="Tipo de movimiento",
+    )
+
+    quantity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        verbose_name="Cantidad",
+    )
+
+    previous_quantity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=0,
+        editable=False,
+        verbose_name="Cantidad anterior",
+    )
+
+    new_quantity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        default=0,
+        editable=False,
+        verbose_name="Cantidad posterior",
+    )
+
+    unit = models.ForeignKey(
+        "organization.Unit",
+        on_delete=models.PROTECT,
+        related_name="stock_movements",
+        editable=False,
+        verbose_name="Unidad",
+    )
+
+    armory = models.ForeignKey(
+        Armory,
+        on_delete=models.PROTECT,
+        related_name="stock_movements",
+        editable=False,
+        verbose_name="Armería o depósito",
+    )
+
+    reason = models.CharField(
+        max_length=250,
+        verbose_name="Motivo",
+    )
+
+    reference_document = models.CharField(
+        max_length=150,
+        blank=True,
+        verbose_name="Documento de respaldo",
+    )
+
+    observations = models.TextField(
+        blank=True,
+        verbose_name="Observaciones",
+    )
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="created_stock_movements",
+        null=True,
+        blank=True,
+        editable=False,
+        verbose_name="Registrado por",
+    )
+
+    class Meta:
+        ordering = [
+            "-created_at",
+        ]
+
+        verbose_name = (
+            "Movimiento de existencia"
+        )
+
+        verbose_name_plural = (
+            "Movimientos de existencias"
+        )
+
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    quantity__gt=0
+                ),
+                name=(
+                    "stock_movement_"
+                    "quantity_positive"
+                ),
+            ),
+
+            models.CheckConstraint(
+                condition=models.Q(
+                    previous_quantity__gte=0
+                ),
+                name=(
+                    "stock_movement_"
+                    "previous_nonnegative"
+                ),
+            ),
+
+            models.CheckConstraint(
+                condition=models.Q(
+                    new_quantity__gte=0
+                ),
+                name=(
+                    "stock_movement_"
+                    "new_nonnegative"
+                ),
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.get_movement_type_display()} - "
+            f"{self.batch} - "
+            f"{self.quantity}"
+        )
 
 class ComponentType(TimeStampedModel):
     """

@@ -22,6 +22,7 @@ from apps.inventory.models import (
     SerializedMaterialComponent,
     StockBatch,
     StockMaterial,
+    StockMovement,
     UnitOfMeasure,
 )
 from apps.inventory.permissions import (
@@ -45,6 +46,7 @@ from apps.inventory.serializers import (
     SerializedMaterialSerializer,
     StockBatchSerializer,
     StockMaterialSerializer,
+    StockMovementSerializer,
     UnitOfMeasureSerializer,
 )
 
@@ -624,6 +626,146 @@ class StockBatchViewSet(
             updated_by=self.request.user,
         )
 
+
+# =========================================================
+# MOVIMIENTOS DE EXISTENCIAS
+# =========================================================
+
+
+class StockMovementViewSet(
+    UnitScopedViewSet
+):
+    queryset = (
+        StockMovement.objects
+        .select_related(
+            "batch",
+            "batch__stock_material",
+            (
+                "batch__stock_material__"
+                "specification"
+            ),
+            (
+                "batch__stock_material__"
+                "unit_of_measure"
+            ),
+            "unit",
+            "armory",
+            "created_by",
+        )
+        .all()
+    )
+
+    serializer_class = (
+        StockMovementSerializer
+    )
+
+    # Los movimientos son registros históricos:
+    # se pueden consultar y crear,
+    # pero NO modificar ni eliminar.
+    http_method_names = [
+        "get",
+        "post",
+        "head",
+        "options",
+    ]
+
+    search_fields = [
+        "batch__lot_number",
+        (
+            "batch__stock_material__"
+            "internal_code"
+        ),
+        (
+            "batch__stock_material__"
+            "specification__name"
+        ),
+        "unit__name",
+        "armory__name",
+        "reason",
+        "reference_document",
+        "observations",
+    ]
+
+    ordering_fields = [
+        "created_at",
+        "movement_type",
+        "quantity",
+        "previous_quantity",
+        "new_quantity",
+    ]
+
+    def get_queryset(self):
+        queryset = (
+            super().get_queryset()
+        )
+
+        batch_id = (
+            self.request
+            .query_params
+            .get("batch")
+        )
+
+        movement_type = (
+            self.request
+            .query_params
+            .get("movement_type")
+        )
+
+        unit_id = (
+            self.request
+            .query_params
+            .get("unit")
+        )
+
+        armory_id = (
+            self.request
+            .query_params
+            .get("armory")
+        )
+
+        if batch_id:
+            queryset = queryset.filter(
+                batch_id=batch_id
+            )
+
+        if movement_type:
+            queryset = queryset.filter(
+                movement_type=
+                    movement_type
+            )
+
+        if unit_id:
+            queryset = queryset.filter(
+                unit_id=unit_id
+            )
+
+        if armory_id:
+            queryset = queryset.filter(
+                armory_id=armory_id
+            )
+
+        return queryset
+
+    def perform_create(
+        self,
+        serializer,
+    ):
+        batch = (
+            serializer.validated_data[
+                "batch"
+            ]
+        )
+
+        # Verifica que el usuario tenga permiso
+        # de escritura sobre la unidad del lote.
+        self.ensure_unit_write_access(
+            batch.unit_id
+        )
+
+        serializer.save(
+            created_by=
+                self.request.user
+        )
 
 class SerializedMaterialComponentViewSet(
     UnitScopedViewSet
