@@ -13,10 +13,16 @@ from rest_framework.response import Response
 from apps.accounts.scopes import get_user_unit_id
 from apps.audit.utils import log_event
 
-from .models import IndividualAssignment
+from .models import (
+    AssignmentCustodyMovementType,
+    IndividualAssignment,
+    IndividualAssignmentCustodyMovement,
+)
 from .permissions import IndividualAssignmentPermission
 from .serializers import (
     IndividualAssignmentCreateSerializer,
+    IndividualAssignmentCustodyActionSerializer,
+    IndividualAssignmentCustodyMovementSerializer,
     IndividualAssignmentPhotoSerializer,
     IndividualAssignmentReturnSerializer,
     IndividualAssignmentSerializer,
@@ -33,7 +39,11 @@ class IndividualAssignmentViewSet(
     - listar dotaciones,
     - consultar detalle,
     - registrar una nueva dotación,
-    - registrar la devolución.
+    - cerrar definitivamente una dotación,
+    - registrar fotografías,
+    - entregar material del pañol al personal,
+    - recibir material del personal en el pañol,
+    - consultar historial de custodia.
 
     No permite:
     - DELETE,
@@ -76,10 +86,6 @@ class IndividualAssignmentViewSet(
         filters.OrderingFilter,
     ]
 
-    # ---------------------------------------------------------
-    # Búsqueda
-    # ---------------------------------------------------------
-
     search_fields = [
         "personnel__tin",
         "personnel__first_name",
@@ -93,10 +99,6 @@ class IndividualAssignmentViewSet(
         "return_document",
     ]
 
-    # ---------------------------------------------------------
-    # Ordenamiento
-    # ---------------------------------------------------------
-
     ordering_fields = [
         "assigned_at",
         "returned_at",
@@ -109,9 +111,9 @@ class IndividualAssignmentViewSet(
         "-assigned_at",
     ]
 
-    # ---------------------------------------------------------
-    # Serializer según operación
-    # ---------------------------------------------------------
+    # =========================================================
+    # SERIALIZER SEGÚN OPERACIÓN
+    # =========================================================
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -123,17 +125,24 @@ class IndividualAssignmentViewSet(
         if self.action == "photos":
             return IndividualAssignmentPhotoSerializer
 
+        if self.action in {
+            "custody_deliver",
+            "custody_receive",
+        }:
+            return IndividualAssignmentCustodyActionSerializer
+
+        if self.action == "custody_history":
+            return IndividualAssignmentCustodyMovementSerializer
+
         return IndividualAssignmentSerializer
 
-    # ---------------------------------------------------------
-    # Alcance por unidad
-    # ---------------------------------------------------------
+    # =========================================================
+    # ALCANCE POR UNIDAD
+    # =========================================================
 
     def get_queryset(self):
         queryset = self.queryset
 
-        # Swagger necesita conocer el modelo
-        # sin aplicar el alcance del usuario.
         if getattr(
             self,
             "swagger_fake_view",
@@ -149,8 +158,7 @@ class IndividualAssignmentViewSet(
         ):
             return queryset.none()
 
-        # Administrador, superusuario y
-        # Comando de la Armada tienen
+        # Administrador / Comando Armada:
         # alcance global.
         if user.has_global_scope:
             scoped_queryset = queryset
@@ -216,9 +224,6 @@ class IndividualAssignmentViewSet(
                 )
             )
 
-        # Solo usuarios de alcance global
-        # pueden solicitar expresamente
-        # cualquier unidad.
         if (
             unit_id
             and user.has_global_scope
@@ -231,9 +236,9 @@ class IndividualAssignmentViewSet(
 
         return scoped_queryset
 
-    # ---------------------------------------------------------
-    # Registrar entrega
-    # ---------------------------------------------------------
+    # =========================================================
+    # CREAR DOTACIÓN INDIVIDUAL
+    # =========================================================
 
     def perform_create(
         self,
@@ -265,9 +270,9 @@ class IndividualAssignmentViewSet(
             },
         )
 
-    # ---------------------------------------------------------
-    # Registrar devolución
-    # ---------------------------------------------------------
+    # =========================================================
+    # DEVOLUCIÓN DEFINITIVA / CIERRE DE DOTACIÓN
+    # =========================================================
 
     @action(
         detail=True,
@@ -280,8 +285,6 @@ class IndividualAssignmentViewSet(
         request,
         pk=None,
     ):
-        # get_object() también ejecuta
-        # has_object_permission().
         assignment = self.get_object()
 
         serializer = self.get_serializer(
@@ -324,10 +327,9 @@ class IndividualAssignmentViewSet(
             status=status.HTTP_200_OK,
         )
 
-
-        # ---------------------------------------------------------
-    # Fotografías de la dotación
-    # ---------------------------------------------------------
+    # =========================================================
+    # FOTOGRAFÍAS
+    # =========================================================
 
     @action(
         detail=True,
@@ -346,22 +348,17 @@ class IndividualAssignmentViewSet(
     ):
         """
         GET:
-            Lista las fotografías de una dotación.
+            Lista fotografías.
 
         POST:
-            Registra una fotografía de entrega
-            o devolución.
-
-        La carga utiliza multipart/form-data.
+            Registra fotografía mediante
+            multipart/form-data.
         """
 
-        # get_object() aplica:
-        # - alcance por unidad,
-        # - permisos sobre el objeto.
         assignment = self.get_object()
 
         # -----------------------------------------------------
-        # Consultar fotografías
+        # CONSULTAR
         # -----------------------------------------------------
 
         if request.method == "GET":
@@ -384,7 +381,7 @@ class IndividualAssignmentViewSet(
             )
 
         # -----------------------------------------------------
-        # Registrar fotografía
+        # REGISTRAR
         # -----------------------------------------------------
 
         serializer_context = (
@@ -430,11 +427,224 @@ class IndividualAssignmentViewSet(
             },
         )
 
-        response_serializer = self.get_serializer(
-            photo
+        response_serializer = (
+            self.get_serializer(
+                photo
+            )
         )
 
         return Response(
             response_serializer.data,
             status=status.HTTP_201_CREATED,
+        )
+
+    # =========================================================
+    # HISTORIAL DE CUSTODIA
+    # =========================================================
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="custody-history",
+        url_name="custody-history",
+    )
+    def custody_history(
+        self,
+        request,
+    ):
+        queryset = (
+            IndividualAssignmentCustodyMovement
+            .objects
+            .select_related(
+                "personnel",
+                "unit",
+                "armory",
+                "created_by",
+            )
+            .prefetch_related(
+                (
+                    "items__assignment__material"
+                    "__specification"
+                ),
+            )
+            .all()
+        )
+
+        user = request.user
+
+        # -----------------------------------------------------
+        # ALCANCE POR UNIDAD
+        # -----------------------------------------------------
+
+        if not user.has_global_scope:
+            user_unit_id = get_user_unit_id(
+                user
+            )
+
+            if not user_unit_id:
+                queryset = queryset.none()
+
+            else:
+                queryset = queryset.filter(
+                    unit_id=user_unit_id
+                )
+
+        # -----------------------------------------------------
+        # FILTROS
+        # -----------------------------------------------------
+
+        personnel_id = (
+            request.query_params.get(
+                "personnel"
+            )
+        )
+
+        assignment_id = (
+            request.query_params.get(
+                "assignment"
+            )
+        )
+
+        movement_type = (
+            request.query_params.get(
+                "movement_type"
+            )
+        )
+
+        if personnel_id:
+            queryset = queryset.filter(
+                personnel_id=personnel_id
+            )
+
+        if assignment_id:
+            queryset = queryset.filter(
+                items__assignment_id=assignment_id
+            )
+
+        if movement_type:
+            queryset = queryset.filter(
+                movement_type=movement_type
+            )
+
+        queryset = queryset.distinct()
+
+        serializer = self.get_serializer(
+            queryset,
+            many=True,
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK,
+        )
+
+    # =========================================================
+    # FUNCIÓN COMÚN PARA ENTREGA / RECEPCIÓN
+    # =========================================================
+
+    def _create_custody_action(
+        self,
+        *,
+        request,
+        movement_type,
+        audit_action,
+    ):
+        """
+        Evita repetir la misma lógica en:
+        - custody-deliver
+        - custody-receive
+        """
+
+        context = (
+            self.get_serializer_context()
+        )
+
+        context[
+            "custody_movement_type"
+        ] = movement_type
+
+        serializer = self.get_serializer(
+            data=request.data,
+            context=context,
+        )
+
+        serializer.is_valid(
+            raise_exception=True
+        )
+
+        movement = serializer.save()
+
+        log_event(
+            request=request,
+            action=audit_action,
+            actor=request.user,
+            target=movement,
+            unit=movement.unit,
+            metadata={
+                "personnel_tin": (
+                    movement.personnel.tin
+                ),
+                "total_items": (
+                    movement.items.count()
+                ),
+                "reference_document": (
+                    movement.reference_document
+                ),
+                "movement_type": (
+                    movement.movement_type
+                ),
+            },
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    # =========================================================
+    # ENTREGAR DEL PAÑOL AL PERSONAL
+    # =========================================================
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="custody-deliver",
+        url_name="custody-deliver",
+    )
+    def custody_deliver(
+        self,
+        request,
+    ):
+        return self._create_custody_action(
+            request=request,
+            movement_type=(
+                AssignmentCustodyMovementType.DELIVERY
+            ),
+            audit_action=(
+                "INDIVIDUAL_CUSTODY_DELIVERED"
+            ),
+        )
+
+    # =========================================================
+    # RECIBIR DEL PERSONAL EN EL PAÑOL
+    # =========================================================
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="custody-receive",
+        url_name="custody-receive",
+    )
+    def custody_receive(
+        self,
+        request,
+    ):
+        return self._create_custody_action(
+            request=request,
+            movement_type=(
+                AssignmentCustodyMovementType.RECEIPT
+            ),
+            audit_action=(
+                "INDIVIDUAL_CUSTODY_RECEIVED"
+            ),
         )

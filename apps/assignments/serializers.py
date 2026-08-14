@@ -8,6 +8,7 @@ from rest_framework import serializers
 
 from apps.accounts.scopes import get_user_unit_id
 from apps.inventory.models import (
+    AllocationType,
     SerializedMaterial,
     SerializedMaterialComponent,
     SerializedStatus,
@@ -15,22 +16,33 @@ from apps.inventory.models import (
 from apps.personnel.models import Personnel
 
 from .models import (
+    AssignmentCustodyState,
     AssignmentPhotoMoment,
-    AssignmentPhotoType,
     AssignmentStatus,
     IndividualAssignment,
     IndividualAssignmentComponent,
+    IndividualAssignmentCustodyItem,
+    IndividualAssignmentCustodyMovement,
     IndividualAssignmentPhoto,
 )
+from .services import create_custody_movement
+
+
+# ============================================================
+# UTILIDAD DE VALIDACIÓN
+# ============================================================
 
 
 def raise_drf_validation_error(exc):
     """
-    Convierte errores de validación de Django
-    en errores de Django REST Framework.
+    Convierte ValidationError de Django en
+    ValidationError de Django REST Framework.
     """
 
-    if hasattr(exc, "message_dict"):
+    if hasattr(
+        exc,
+        "message_dict",
+    ):
         raise serializers.ValidationError(
             exc.message_dict
         )
@@ -95,11 +107,15 @@ class AssignmentComponentInputSerializer(
     serializers.Serializer
 ):
     component = serializers.PrimaryKeyRelatedField(
-        queryset=SerializedMaterialComponent.objects.filter(
-            is_active=True
-        ).select_related(
-            "material",
-            "component_type",
+        queryset=(
+            SerializedMaterialComponent.objects
+            .filter(
+                is_active=True
+            )
+            .select_related(
+                "material",
+                "component_type",
+            )
         )
     )
 
@@ -116,6 +132,291 @@ class AssignmentComponentInputSerializer(
 
 
 # ============================================================
+# CUSTODIA - ITEM
+# ============================================================
+
+
+class IndividualAssignmentCustodyItemSerializer(
+    serializers.ModelSerializer
+):
+    material = serializers.UUIDField(
+        source="assignment.material_id",
+        read_only=True,
+    )
+
+    material_code = serializers.CharField(
+        source=(
+            "assignment.material.institutional_code"
+        ),
+        read_only=True,
+    )
+
+    material_identification_number = (
+        serializers.CharField(
+            source=(
+                "assignment.material."
+                "identification_number"
+            ),
+            read_only=True,
+        )
+    )
+
+    material_specification = serializers.CharField(
+        source=(
+            "assignment.material."
+            "specification.name"
+        ),
+        read_only=True,
+    )
+
+    class Meta:
+        model = (
+            IndividualAssignmentCustodyItem
+        )
+
+        fields = [
+            "id",
+            "assignment",
+            "material",
+            "material_code",
+            "material_identification_number",
+            "material_specification",
+            "created_at",
+        ]
+
+        read_only_fields = fields
+
+
+# ============================================================
+# CUSTODIA - CONSULTA DE MOVIMIENTO
+# ============================================================
+
+
+class IndividualAssignmentCustodyMovementSerializer(
+    serializers.ModelSerializer
+):
+    movement_type_display = serializers.CharField(
+        source="get_movement_type_display",
+        read_only=True,
+    )
+
+    personnel_tin = serializers.CharField(
+        source="personnel.tin",
+        read_only=True,
+    )
+
+    personnel_name = serializers.CharField(
+        source="personnel.full_name",
+        read_only=True,
+    )
+
+    unit_name = serializers.CharField(
+        source="unit.name",
+        read_only=True,
+    )
+
+    armory_name = serializers.CharField(
+        source="armory.name",
+        read_only=True,
+    )
+
+    created_by_email = serializers.CharField(
+        source="created_by.email",
+        read_only=True,
+    )
+
+    items = (
+        IndividualAssignmentCustodyItemSerializer(
+            many=True,
+            read_only=True,
+        )
+    )
+
+    total_items = serializers.SerializerMethodField()
+
+    class Meta:
+        model = (
+            IndividualAssignmentCustodyMovement
+        )
+
+        fields = [
+            "id",
+
+            "movement_type",
+            "movement_type_display",
+            "movement_at",
+
+            "personnel",
+            "personnel_tin",
+            "personnel_name",
+
+            "unit",
+            "unit_name",
+
+            "armory",
+            "armory_name",
+
+            "reason",
+            "reference_document",
+            "observations",
+
+            "items",
+            "total_items",
+
+            "created_by",
+            "created_by_email",
+
+            "created_at",
+            "updated_at",
+        ]
+
+        read_only_fields = fields
+
+    def get_total_items(
+        self,
+        obj,
+    ):
+        return len(
+            obj.items.all()
+        )
+
+
+# ============================================================
+# CUSTODIA - ENTREGA / RECEPCIÓN
+# ============================================================
+
+
+class IndividualAssignmentCustodyActionSerializer(
+    serializers.Serializer
+):
+    assignments = serializers.PrimaryKeyRelatedField(
+        queryset=(
+            IndividualAssignment.objects
+            .select_related(
+                "personnel",
+                "material",
+                "material__unit",
+                "material__armory",
+            )
+        ),
+        many=True,
+    )
+
+    reason = serializers.CharField(
+        max_length=250,
+    )
+
+    reference_document = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=150,
+        default="",
+    )
+
+    observations = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+
+    def validate_assignments(
+        self,
+        assignments,
+    ):
+        if not assignments:
+            raise serializers.ValidationError(
+                (
+                    "Debe seleccionar al menos "
+                    "una dotación."
+                )
+            )
+
+        ids = [
+            str(
+                item.id
+            )
+            for item in assignments
+        ]
+
+        if (
+            len(ids)
+            != len(
+                set(ids)
+            )
+        ):
+            raise serializers.ValidationError(
+                (
+                    "No puede seleccionar dos veces "
+                    "la misma dotación."
+                )
+            )
+
+        return assignments
+
+    def create(
+        self,
+        validated_data,
+    ):
+        request = self.context[
+            "request"
+        ]
+
+        movement_type = self.context[
+            "custody_movement_type"
+        ]
+
+        assignments = validated_data.pop(
+            "assignments"
+        )
+
+        try:
+            return create_custody_movement(
+                actor=request.user,
+
+                assignment_ids=[
+                    item.id
+                    for item in assignments
+                ],
+
+                movement_type=movement_type,
+
+                reason=validated_data[
+                    "reason"
+                ],
+
+                reference_document=(
+                    validated_data.get(
+                        "reference_document",
+                        "",
+                    )
+                ),
+
+                observations=(
+                    validated_data.get(
+                        "observations",
+                        "",
+                    )
+                ),
+            )
+
+        except DjangoValidationError as exc:
+            raise_drf_validation_error(
+                exc
+            )
+
+    def to_representation(
+        self,
+        instance,
+    ):
+        return (
+            IndividualAssignmentCustodyMovementSerializer(
+                instance,
+                context=self.context,
+            ).data
+        )
+
+
+# ============================================================
 # DOTACIÓN - CONSULTA
 # ============================================================
 
@@ -123,6 +424,10 @@ class AssignmentComponentInputSerializer(
 class IndividualAssignmentSerializer(
     serializers.ModelSerializer
 ):
+    # --------------------------------------------------------
+    # Personal
+    # --------------------------------------------------------
+
     personnel_tin = serializers.CharField(
         source="personnel.tin",
         read_only=True,
@@ -145,14 +450,22 @@ class IndividualAssignmentSerializer(
         default=None,
     )
 
+    # --------------------------------------------------------
+    # Material
+    # --------------------------------------------------------
+
     material_code = serializers.CharField(
         source="material.institutional_code",
         read_only=True,
     )
 
-    material_identification_number = serializers.CharField(
-        source="material.identification_number",
-        read_only=True,
+    material_identification_number = (
+        serializers.CharField(
+            source=(
+                "material.identification_number"
+            ),
+            read_only=True,
+        )
     )
 
     material_specification = serializers.CharField(
@@ -175,10 +488,30 @@ class IndividualAssignmentSerializer(
         read_only=True,
     )
 
+    # --------------------------------------------------------
+    # Estado administrativo
+    # --------------------------------------------------------
+
     status_display = serializers.CharField(
         source="get_status_display",
         read_only=True,
     )
+
+    # --------------------------------------------------------
+    # Estado físico de custodia
+    # --------------------------------------------------------
+
+    custody_status = (
+        serializers.SerializerMethodField()
+    )
+
+    custody_status_display = (
+        serializers.SerializerMethodField()
+    )
+
+    # --------------------------------------------------------
+    # Usuarios
+    # --------------------------------------------------------
 
     assigned_by_email = serializers.CharField(
         source="assigned_by.email",
@@ -191,11 +524,70 @@ class IndividualAssignmentSerializer(
         default=None,
     )
 
-    components = IndividualAssignmentComponentSerializer(
-        source="assigned_components",
-        many=True,
-        read_only=True,
+    # --------------------------------------------------------
+    # Componentes
+    # --------------------------------------------------------
+
+    components = (
+        IndividualAssignmentComponentSerializer(
+            source="assigned_components",
+            many=True,
+            read_only=True,
+        )
     )
+
+    # --------------------------------------------------------
+    # Fotografías
+    # --------------------------------------------------------
+
+    photos = serializers.SerializerMethodField()
+
+    def get_photos(
+        self,
+        obj,
+    ):
+        photos = (
+            obj.photos
+            .select_related(
+                "uploaded_by"
+            )
+            .all()
+        )
+
+        return (
+            IndividualAssignmentPhotoSerializer(
+                photos,
+                many=True,
+                context=self.context,
+            ).data
+        )
+
+    # --------------------------------------------------------
+    # Custodia
+    # --------------------------------------------------------
+
+    def get_custody_status(
+        self,
+        obj,
+    ):
+        return (
+            obj.get_current_custody_state()
+        )
+
+    def get_custody_status_display(
+        self,
+        obj,
+    ):
+        value = (
+            obj.get_current_custody_state()
+        )
+
+        return dict(
+            AssignmentCustodyState.choices
+        ).get(
+            value,
+            value,
+        )
 
     class Meta:
         model = IndividualAssignment
@@ -219,7 +611,7 @@ class IndividualAssignmentSerializer(
             "material_unit_name",
             "material_status",
 
-            # Entrega
+            # Dotación
             "assigned_at",
             "assignment_document",
             "assignment_observations",
@@ -230,15 +622,20 @@ class IndividualAssignmentSerializer(
             "status",
             "status_display",
 
-            # Devolución
+            # Custodia física
+            "custody_status",
+            "custody_status_display",
+
+            # Cierre definitivo
             "returned_at",
             "return_document",
             "return_observations",
             "returned_by",
             "returned_by_email",
 
-            # Componentes
+            # Detalle
             "components",
+            "photos",
 
             # Auditoría temporal
             "created_at",
@@ -257,21 +654,35 @@ class IndividualAssignmentCreateSerializer(
     serializers.Serializer
 ):
     personnel = serializers.PrimaryKeyRelatedField(
-        queryset=Personnel.objects.filter(
-            is_active=True
-        ).select_related(
-            "unit",
+        queryset=(
+            Personnel.objects
+            .filter(
+                is_active=True
+            )
+            .select_related(
+                "unit"
+            )
         )
     )
 
     material = serializers.PrimaryKeyRelatedField(
-        queryset=SerializedMaterial.objects.filter(
-            is_active=True
-        ).select_related(
-            "unit",
-            "armory",
-            "specification",
-            "specification__material_type",
+        queryset=(
+            SerializedMaterial.objects
+            .filter(
+                is_active=True,
+                allocation_type=(
+                    AllocationType.INDIVIDUAL
+                ),
+            )
+            .select_related(
+                "unit",
+                "armory",
+                "specification",
+                (
+                    "specification"
+                    "__material_type"
+                ),
+            )
         )
     )
 
@@ -294,25 +705,21 @@ class IndividualAssignmentCreateSerializer(
         default=list,
     )
 
-    def validate(self, attrs):
-        personnel = attrs["personnel"]
-        material = attrs["material"]
-        # -----------------------------------------------------
-        # El material solamente puede pertenecer
-        # a un personal durante toda su vida útil.
-        # -----------------------------------------------------
+    # ========================================================
+    # VALIDACIÓN
+    # ========================================================
 
-        if IndividualAssignment.objects.filter(
-            material=material,
-        ).exists():
-            raise serializers.ValidationError(
-                {
-                    "material": (
-                        "Este material ya se encuentra vinculado "
-                        "a un personal y no puede ser reasignado."
-                    )
-                }
-            )
+    def validate(
+        self,
+        attrs,
+    ):
+        personnel = attrs[
+            "personnel"
+        ]
+
+        material = attrs[
+            "material"
+        ]
 
         components = attrs.get(
             "components",
@@ -323,23 +730,85 @@ class IndividualAssignmentCreateSerializer(
             "request"
         )
 
-        # -----------------------------------------------------
-        # Unidad del personal
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # MATERIAL INDIVIDUAL
+        # ----------------------------------------------------
+
+        if (
+            material.allocation_type
+            != AllocationType.INDIVIDUAL
+        ):
+            raise serializers.ValidationError(
+                {
+                    "material": (
+                        "El material seleccionado "
+                        "no corresponde a dotación "
+                        "individual."
+                    )
+                }
+            )
+
+        # ----------------------------------------------------
+        # DISPONIBILIDAD
+        # ----------------------------------------------------
+
+        if (
+            material.status
+            != SerializedStatus.AVAILABLE
+        ):
+            raise serializers.ValidationError(
+                {
+                    "material": (
+                        "El material debe encontrarse "
+                        "DISPONIBLE para iniciar una "
+                        "dotación."
+                    )
+                }
+            )
+
+        # ----------------------------------------------------
+        # NO PUEDE EXISTIR OTRA DOTACIÓN ACTIVA
+        #
+        # Una dotación RETURNED es historial y NO impide
+        # una futura nueva dotación.
+        # ----------------------------------------------------
+
+        active_exists = (
+            IndividualAssignment.objects
+            .filter(
+                material=material,
+                status=AssignmentStatus.ACTIVE,
+            )
+            .exists()
+        )
+
+        if active_exists:
+            raise serializers.ValidationError(
+                {
+                    "material": (
+                        "El material ya posee una "
+                        "dotación activa."
+                    )
+                }
+            )
+
+        # ----------------------------------------------------
+        # PERSONAL DEBE TENER UNIDAD
+        # ----------------------------------------------------
 
         if not personnel.unit_id:
             raise serializers.ValidationError(
                 {
                     "personnel": (
-                        "El personal debe estar asociado "
-                        "a una unidad."
+                        "El personal debe estar "
+                        "asociado a una unidad."
                     )
                 }
             )
 
-        # -----------------------------------------------------
-        # Misma unidad
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # MISMA UNIDAD
+        # ----------------------------------------------------
 
         if (
             personnel.unit_id
@@ -349,14 +818,15 @@ class IndividualAssignmentCreateSerializer(
                 {
                     "material": (
                         "El material y el personal "
-                        "deben pertenecer a la misma unidad."
+                        "deben pertenecer a la "
+                        "misma unidad."
                     )
                 }
             )
 
-        # -----------------------------------------------------
-        # Alcance del usuario que registra
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # ALCANCE DEL USUARIO
+        # ----------------------------------------------------
 
         if (
             request
@@ -364,61 +834,82 @@ class IndividualAssignmentCreateSerializer(
             and request.user.is_authenticated
             and not request.user.has_global_scope
         ):
-            user_unit_id = get_user_unit_id(
-                request.user
+            user_unit_id = (
+                get_user_unit_id(
+                    request.user
+                )
             )
 
             if not user_unit_id:
                 raise serializers.ValidationError(
                     {
                         "personnel": (
-                            "El usuario no tiene una unidad "
-                            "institucional asociada."
+                            "El usuario no tiene una "
+                            "unidad institucional "
+                            "asociada."
                         )
                     }
                 )
 
             if (
-                str(user_unit_id)
-                != str(personnel.unit_id)
+                str(
+                    user_unit_id
+                )
+                != str(
+                    personnel.unit_id
+                )
             ):
                 raise serializers.ValidationError(
                     {
                         "personnel": (
-                            "No puede registrar dotaciones "
-                            "para otra unidad."
+                            "No puede registrar "
+                            "dotaciones para otra "
+                            "unidad."
                         )
                     }
                 )
 
-        # -----------------------------------------------------
-        # Componentes repetidos
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # COMPONENTES REPETIDOS
+        # ----------------------------------------------------
 
         component_ids = [
-            str(item["component"].id)
+            str(
+                item[
+                    "component"
+                ].id
+            )
             for item in components
         ]
 
         if (
-            len(component_ids)
-            != len(set(component_ids))
+            len(
+                component_ids
+            )
+            != len(
+                set(
+                    component_ids
+                )
+            )
         ):
             raise serializers.ValidationError(
                 {
                     "components": (
-                        "No se puede registrar dos veces "
-                        "el mismo componente."
+                        "No se puede registrar "
+                        "dos veces el mismo "
+                        "componente."
                     )
                 }
             )
 
-        # -----------------------------------------------------
-        # Los componentes deben pertenecer al material
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # COMPONENTES DEL MISMO MATERIAL
+        # ----------------------------------------------------
 
         for item in components:
-            component = item["component"]
+            component = item[
+                "component"
+            ]
 
             if (
                 component.material_id
@@ -427,34 +918,50 @@ class IndividualAssignmentCreateSerializer(
                 raise serializers.ValidationError(
                     {
                         "components": (
-                            "Todos los componentes deben "
-                            "pertenecer al material principal."
+                            "Todos los componentes "
+                            "deben pertenecer al "
+                            "material principal."
                         )
                     }
                 )
 
         return attrs
 
+    # ========================================================
+    # CREAR
+    # ========================================================
+
     @transaction.atomic
-    def create(self, validated_data):
-        request = self.context["request"]
-
-        personnel_input = validated_data[
-            "personnel"
+    def create(
+        self,
+        validated_data,
+    ):
+        request = self.context[
+            "request"
         ]
 
-        material_input = validated_data[
-            "material"
-        ]
-
-        component_data = validated_data.pop(
-            "components",
-            [],
+        personnel_input = (
+            validated_data[
+                "personnel"
+            ]
         )
 
-        # -----------------------------------------------------
-        # Bloqueamos Personnel durante la operación.
-        # -----------------------------------------------------
+        material_input = (
+            validated_data[
+                "material"
+            ]
+        )
+
+        component_data = (
+            validated_data.pop(
+                "components",
+                [],
+            )
+        )
+
+        # ----------------------------------------------------
+        # BLOQUEAR PERSONAL
+        # ----------------------------------------------------
 
         personnel = (
             Personnel.objects
@@ -464,12 +971,9 @@ class IndividualAssignmentCreateSerializer(
             )
         )
 
-        # -----------------------------------------------------
-        # Bloqueamos el material.
-        #
-        # Evita que dos solicitudes simultáneas
-        # asignen el mismo material.
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # BLOQUEAR MATERIAL
+        # ----------------------------------------------------
 
         material = (
             SerializedMaterial.objects
@@ -478,22 +982,26 @@ class IndividualAssignmentCreateSerializer(
                 "unit",
                 "armory",
                 "specification",
-                "specification__material_type",
+                (
+                    "specification"
+                    "__material_type"
+                ),
             )
             .get(
                 pk=material_input.pk
             )
         )
 
-        # -----------------------------------------------------
-        # Revalidamos después del bloqueo.
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # REVALIDACIÓN DESPUÉS DEL BLOQUEO
+        # ----------------------------------------------------
 
         if not personnel.is_active:
             raise serializers.ValidationError(
                 {
                     "personnel": (
-                        "El personal se encuentra inactivo."
+                        "El personal se "
+                        "encuentra inactivo."
                     )
                 }
             )
@@ -502,7 +1010,21 @@ class IndividualAssignmentCreateSerializer(
             raise serializers.ValidationError(
                 {
                     "material": (
-                        "El material se encuentra inactivo."
+                        "El material se "
+                        "encuentra inactivo."
+                    )
+                }
+            )
+
+        if (
+            material.allocation_type
+            != AllocationType.INDIVIDUAL
+        ):
+            raise serializers.ValidationError(
+                {
+                    "material": (
+                        "El material no corresponde "
+                        "a dotación individual."
                     )
                 }
             )
@@ -514,8 +1036,18 @@ class IndividualAssignmentCreateSerializer(
             raise serializers.ValidationError(
                 {
                     "material": (
-                        "El material ya no se encuentra "
-                        "DISPONIBLE."
+                        "El material ya no se "
+                        "encuentra DISPONIBLE."
+                    )
+                }
+            )
+
+        if not personnel.unit_id:
+            raise serializers.ValidationError(
+                {
+                    "personnel": (
+                        "El personal debe estar "
+                        "asociado a una unidad."
                     )
                 }
             )
@@ -528,61 +1060,122 @@ class IndividualAssignmentCreateSerializer(
                 {
                     "material": (
                         "El material y el personal "
-                        "deben pertenecer a la misma unidad."
+                        "deben pertenecer a la "
+                        "misma unidad."
                     )
                 }
             )
 
-        # -----------------------------------------------------
-        # Regla permanente de dotación.
-        #
-        # Aunque una dotación anterior se encuentre RETURNED,
-        # el material no puede asignarse a otra persona.
-        # Esta comprobación se repite después del
-        # select_for_update() para evitar condiciones de carrera.
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # REVALIDAR QUE NO EXISTA DOTACIÓN ACTIVA
+        # ----------------------------------------------------
 
-        if IndividualAssignment.objects.filter(
-            material=material,
-        ).exists():
+        active_exists = (
+            IndividualAssignment.objects
+            .filter(
+                material=material,
+                status=AssignmentStatus.ACTIVE,
+            )
+            .exists()
+        )
+
+        if active_exists:
             raise serializers.ValidationError(
                 {
                     "material": (
-                        "Este material ya se encuentra vinculado "
-                        "a un personal y no puede ser reasignado."
+                        "El material ya posee una "
+                        "dotación activa."
                     )
                 }
             )
 
-        # -----------------------------------------------------
-        # Crear dotación
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # REVALIDAR ALCANCE
+        # ----------------------------------------------------
+
+        if not request.user.has_global_scope:
+            user_unit_id = (
+                get_user_unit_id(
+                    request.user
+                )
+            )
+
+            if not user_unit_id:
+                raise serializers.ValidationError(
+                    {
+                        "personnel": (
+                            "El usuario no tiene una "
+                            "unidad institucional "
+                            "asociada."
+                        )
+                    }
+                )
+
+            if (
+                str(
+                    user_unit_id
+                )
+                != str(
+                    personnel.unit_id
+                )
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "personnel": (
+                            "No puede registrar "
+                            "dotaciones para otra "
+                            "unidad."
+                        )
+                    }
+                )
+
+        # ----------------------------------------------------
+        # CREAR DOTACIÓN
+        #
+        # Al crearse:
+        # - Dotación = ACTIVE
+        # - Material = ASSIGNED
+        # - Custodia inicial = ARMORY
+        #
+        # La entrega física se registra aparte mediante:
+        # custody-deliver/
+        # ----------------------------------------------------
 
         assignment = IndividualAssignment(
             personnel=personnel,
             material=material,
             assigned_by=request.user,
-            assignment_document=validated_data.get(
-                "assignment_document",
-                "",
+
+            assignment_document=(
+                validated_data.get(
+                    "assignment_document",
+                    "",
+                )
             ),
-            assignment_observations=validated_data.get(
-                "assignment_observations",
-                "",
+
+            assignment_observations=(
+                validated_data.get(
+                    "assignment_observations",
+                    "",
+                )
             ),
+
             status=AssignmentStatus.ACTIVE,
         )
 
         try:
             assignment.full_clean()
+
         except DjangoValidationError as exc:
-            raise_drf_validation_error(exc)
+            raise_drf_validation_error(
+                exc
+            )
 
         assignment.save()
 
-        # -----------------------------------------------------
-        # Componentes entregados
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # COMPONENTES
+        # ----------------------------------------------------
 
         for item in component_data:
             component_input = item[
@@ -605,28 +1198,37 @@ class IndividualAssignmentCreateSerializer(
                 IndividualAssignmentComponent(
                     assignment=assignment,
                     component=component,
-                    quantity_delivered=item.get(
-                        "quantity_delivered",
-                        1,
+
+                    quantity_delivered=(
+                        item.get(
+                            "quantity_delivered",
+                            1,
+                        )
                     ),
-                    observations=item.get(
-                        "observations",
-                        "",
+
+                    observations=(
+                        item.get(
+                            "observations",
+                            "",
+                        )
                     ),
                 )
             )
 
             try:
                 assignment_component.full_clean()
+
             except DjangoValidationError as exc:
-                raise_drf_validation_error(exc)
+                raise_drf_validation_error(
+                    exc
+                )
 
             assignment_component.save()
 
-        # -----------------------------------------------------
-        # Inventario:
+        # ----------------------------------------------------
+        # INVENTARIO
         # AVAILABLE -> ASSIGNED
-        # -----------------------------------------------------
+        # ----------------------------------------------------
 
         material.status = (
             SerializedStatus.ASSIGNED
@@ -638,14 +1240,20 @@ class IndividualAssignmentCreateSerializer(
 
         try:
             material.full_clean()
+
         except DjangoValidationError as exc:
-            raise_drf_validation_error(exc)
+            raise_drf_validation_error(
+                exc
+            )
 
         material.save()
 
         return assignment
 
-    def to_representation(self, instance):
+    def to_representation(
+        self,
+        instance,
+    ):
         return IndividualAssignmentSerializer(
             instance,
             context=self.context,
@@ -653,7 +1261,7 @@ class IndividualAssignmentCreateSerializer(
 
 
 # ============================================================
-# DEVOLUCIÓN DE DOTACIÓN
+# CIERRE DEFINITIVO DE DOTACIÓN
 # ============================================================
 
 
@@ -679,11 +1287,13 @@ class IndividualAssignmentReturnSerializer(
         instance,
         validated_data,
     ):
-        request = self.context["request"]
+        request = self.context[
+            "request"
+        ]
 
-        # -----------------------------------------------------
-        # Bloquear dotación.
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # BLOQUEAR DOTACIÓN
+        # ----------------------------------------------------
 
         assignment = (
             IndividualAssignment.objects
@@ -691,11 +1301,17 @@ class IndividualAssignmentReturnSerializer(
             .select_related(
                 "personnel",
                 "material",
+                "material__unit",
+                "material__armory",
             )
             .get(
                 pk=instance.pk
             )
         )
+
+        # ----------------------------------------------------
+        # DEBE ESTAR ACTIVA
+        # ----------------------------------------------------
 
         if (
             assignment.status
@@ -704,14 +1320,37 @@ class IndividualAssignmentReturnSerializer(
             raise serializers.ValidationError(
                 {
                     "status": (
-                        "Esta dotación ya fue devuelta."
+                        "Esta dotación ya se "
+                        "encuentra finalizada."
                     )
                 }
             )
 
-        # -----------------------------------------------------
-        # Bloquear material.
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # EL MATERIAL DEBE ESTAR FÍSICAMENTE EN EL PAÑOL
+        #
+        # Una simple recepción temporal NO cierra la dotación.
+        # ----------------------------------------------------
+
+        if (
+            assignment.get_current_custody_state()
+            != AssignmentCustodyState.ARMORY
+        ):
+            raise serializers.ValidationError(
+                {
+                    "status": (
+                        "Antes de cerrar "
+                        "definitivamente la dotación "
+                        "debe registrar la recepción "
+                        "física del material en el "
+                        "pañol."
+                    )
+                }
+            )
+
+        # ----------------------------------------------------
+        # BLOQUEAR MATERIAL
+        # ----------------------------------------------------
 
         material = (
             SerializedMaterial.objects
@@ -721,9 +1360,27 @@ class IndividualAssignmentReturnSerializer(
             )
         )
 
-        # -----------------------------------------------------
-        # Cerrar dotación.
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # DEBE SEGUIR ADMINISTRATIVAMENTE ASIGNADO
+        # ----------------------------------------------------
+
+        if (
+            material.status
+            != SerializedStatus.ASSIGNED
+        ):
+            raise serializers.ValidationError(
+                {
+                    "material": (
+                        "El material no se encuentra "
+                        "en estado ASIGNADO y la "
+                        "dotación no puede cerrarse."
+                    )
+                }
+            )
+
+        # ----------------------------------------------------
+        # CERRAR DOTACIÓN
+        # ----------------------------------------------------
 
         assignment.status = (
             AssignmentStatus.RETURNED
@@ -753,15 +1410,22 @@ class IndividualAssignmentReturnSerializer(
 
         try:
             assignment.full_clean()
+
         except DjangoValidationError as exc:
-            raise_drf_validation_error(exc)
+            raise_drf_validation_error(
+                exc
+            )
 
         assignment.save()
 
-        # -----------------------------------------------------
-        # Inventario:
+        # ----------------------------------------------------
+        # INVENTARIO
+        #
+        # Ahora sí:
         # ASSIGNED -> AVAILABLE
-        # -----------------------------------------------------
+        #
+        # porque la dotación administrativa terminó.
+        # ----------------------------------------------------
 
         material.status = (
             SerializedStatus.AVAILABLE
@@ -773,24 +1437,41 @@ class IndividualAssignmentReturnSerializer(
 
         try:
             material.full_clean()
+
         except DjangoValidationError as exc:
-            raise_drf_validation_error(exc)
+            raise_drf_validation_error(
+                exc
+            )
 
         material.save()
 
         return assignment
 
-    def create(self, validated_data):
+    def create(
+        self,
+        validated_data,
+    ):
         raise NotImplementedError(
-            "Este serializer solamente se utiliza "
-            "para devolver una dotación existente."
+            (
+                "Este serializer solamente se "
+                "utiliza para cerrar una "
+                "dotación existente."
+            )
         )
 
-    def to_representation(self, instance):
+    def to_representation(
+        self,
+        instance,
+    ):
         return IndividualAssignmentSerializer(
             instance,
             context=self.context,
         ).data
+
+
+# ============================================================
+# FOTOGRAFÍAS
+# ============================================================
 
 
 class IndividualAssignmentPhotoSerializer(
@@ -843,7 +1524,10 @@ class IndividualAssignmentPhotoSerializer(
             "created_at",
         ]
 
-    def validate(self, attrs):
+    def validate(
+        self,
+        attrs,
+    ):
         assignment = self.context.get(
             "assignment"
         )
@@ -862,28 +1546,35 @@ class IndividualAssignmentPhotoSerializer(
                 }
             )
 
-        # ---------------------------------------------
-        # Fotografía de devolución
-        # ---------------------------------------------
+        # ----------------------------------------------------
+        # RETURN = CIERRE DEFINITIVO
+        #
+        # No confundir con RECEIPT de custodia.
+        # ----------------------------------------------------
 
         if (
-            moment == AssignmentPhotoMoment.RETURN
+            moment
+            == AssignmentPhotoMoment.RETURN
             and assignment.status
             != AssignmentStatus.RETURNED
         ):
             raise serializers.ValidationError(
                 {
                     "moment": (
-                        "Las fotografías de devolución "
-                        "solo pueden registrarse después "
-                        "de devolver la dotación."
+                        "Las fotografías de "
+                        "devolución definitiva solo "
+                        "pueden registrarse después "
+                        "del cierre de la dotación."
                     )
                 }
             )
 
         return attrs
 
-    def create(self, validated_data):
+    def create(
+        self,
+        validated_data,
+    ):
         request = self.context[
             "request"
         ]
@@ -892,8 +1583,10 @@ class IndividualAssignmentPhotoSerializer(
             "assignment"
         ]
 
-        return IndividualAssignmentPhoto.objects.create(
-            assignment=assignment,
-            uploaded_by=request.user,
-            **validated_data,
+        return (
+            IndividualAssignmentPhoto.objects.create(
+                assignment=assignment,
+                uploaded_by=request.user,
+                **validated_data,
+            )
         )

@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     "apps.inventory.apps.InventoryConfig",
     "apps.personnel.apps.PersonnelConfig",
     "apps.assignments.apps.AssignmentsConfig",
+    "apps.movements.apps.MovementsConfig",
 ]
 
 MIDDLEWARE = [

@@ -415,6 +415,7 @@ class Armory(TimeStampedModel):
 class SerializedStatus(models.TextChoices):
     AVAILABLE = "AVAILABLE", "Disponible"
     ASSIGNED = "ASSIGNED", "Asignado"
+    ISSUED = "ISSUED", "Salida temporal"
     MAINTENANCE = "MAINTENANCE", "En mantenimiento"
     OBSERVED = "OBSERVED", "Observado"
     TRANSFER = "TRANSFER", "En transferencia"
@@ -428,6 +429,16 @@ class PhysicalCondition(models.TextChoices):
     DAMAGED = "DAMAGED", "Dañado"
     UNVERIFIED = "UNVERIFIED", "No verificado"
 
+class AllocationType(models.TextChoices):
+    INDIVIDUAL = (
+        "INDIVIDUAL",
+        "Dotación individual",
+    )
+
+    UNIT = (
+        "UNIT",
+        "Dotación de unidad",
+    )
 
 class SerializedMaterial(TimeStampedModel):
     """
@@ -440,6 +451,13 @@ class SerializedMaterial(TimeStampedModel):
         primary_key=True,
         default=uuid.uuid4,
         editable=False,
+    )
+    allocation_type = models.CharField(
+        max_length=20,
+        choices=AllocationType.choices,
+        default=AllocationType.UNIT,
+        db_index=True,
+        verbose_name="Tipo de dotación",
     )
     institutional_code = models.CharField(
         max_length=50,
