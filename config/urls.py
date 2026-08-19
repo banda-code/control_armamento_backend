@@ -26,6 +26,8 @@ urlpatterns = [
     path("api/personnel/", include("apps.personnel.urls")),
     path("api/assignments/", include("apps.assignments.urls")),
     path("api/movements/",include("apps.movements.urls")),
+    path("api/reports/",include("apps.reports.urls"),),
+
 ]
 if settings.DEBUG:
     urlpatterns += static(
