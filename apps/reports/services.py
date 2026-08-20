@@ -6,6 +6,11 @@ from django.db.models import Count, Sum
 from django.utils import timezone
 
 from apps.accounts.scopes import get_user_unit_id
+from apps.assignments.models import (
+    AssignmentStatus,
+    IndividualAssignment,
+)
+from apps.personnel.models import Personnel
 from apps.inventory.models import (
     ControlMethod,
     MaterialSpecification,
@@ -25,6 +30,259 @@ CATEGORY_ORDER = {
     "AGENTES QUÍMICOS": 40,
     "EXPLOSIVOS": 50,
 }
+
+
+# ============================================================
+# FILIACIÓN / REGISTRO DE ARMAMENTO DE DOTACIÓN INDIVIDUAL
+# ============================================================
+
+
+def build_individual_filiation_report(
+    unit,
+    personnel_id,
+):
+    """
+    Construye los datos necesarios para generar
+    el Registro de Armamento de Dotación Individual.
+    """
+
+    # --------------------------------------------------------
+    # PERSONAL
+    # --------------------------------------------------------
+
+    try:
+        personnel = (
+            Personnel.objects
+            .select_related(
+                "rank",
+                "position",
+                "unit",
+                "section",
+            )
+            .get(
+                pk=personnel_id,
+                unit=unit,
+                is_active=True,
+            )
+        )
+    except Personnel.DoesNotExist as exc:
+        raise ValidationError(
+            "El personal seleccionado no existe "
+            "o no pertenece a la unidad."
+        ) from exc
+
+    # --------------------------------------------------------
+    # DOTACIONES INDIVIDUALES ACTIVAS
+    # --------------------------------------------------------
+
+    assignments = list(
+        IndividualAssignment.objects
+        .filter(
+            personnel=personnel,
+            status=AssignmentStatus.ACTIVE,
+            material__is_active=True,
+        )
+        .select_related(
+            "material",
+            "material__unit",
+            "material__armory",
+            "material__specification",
+            "material__specification__material_type",
+            "material__specification__manufacturer",
+            "material__specification__country",
+            "material__specification__caliber",
+        )
+        .prefetch_related(
+            "assigned_components__component__component_type",
+            "photos",
+        )
+        .order_by(
+            "material__specification__material_type__name",
+            "assigned_at",
+        )
+    )
+
+    if not assignments:
+        raise ValidationError(
+            "El personal seleccionado no tiene "
+            "dotaciones individuales activas."
+        )
+
+    # --------------------------------------------------------
+    # MATERIALES
+    # --------------------------------------------------------
+
+    materials = []
+
+    for assignment in assignments:
+        material = assignment.material
+        specification = material.specification
+        material_type = specification.material_type
+
+        components = []
+
+        magazine_count = 0
+
+        for assigned_component in (
+            assignment.assigned_components.all()
+        ):
+            component = assigned_component.component
+            component_type = component.component_type
+
+            quantity = (
+                assigned_component.quantity_delivered
+            )
+
+            components.append(
+                {
+                    "type": component_type.name,
+                    "identification_number": (
+                        component.identification_number
+                        or ""
+                    ),
+                    "quantity": quantity,
+                    "observations": (
+                        assigned_component.observations
+                        or ""
+                    ),
+                }
+            )
+
+            if (
+                "CARGADOR"
+                in component_type.name.upper()
+            ):
+                magazine_count += int(quantity or 0)
+
+        material_data = {
+            "assignment_id": str(assignment.id),
+
+            "material_type": material_type.name,
+
+            "institutional_code": (
+                material.institutional_code
+            ),
+
+            "identification_number": (
+                material.identification_number
+            ),
+
+            "model": specification.name,
+
+            "manufacturer": (
+                specification.manufacturer.name
+                if specification.manufacturer
+                else ""
+            ),
+
+            "country": (
+                specification.country.name
+                if specification.country
+                else ""
+            ),
+
+            "caliber": (
+                specification.caliber.name
+                if specification.caliber
+                else ""
+            ),
+
+            "observations": (
+                material.observations
+                or assignment.assignment_observations
+                or ""
+            ),
+
+            "magazine_count": magazine_count,
+
+            "components": components,
+
+            "photos": list(
+                assignment.photos.all()
+            ),
+        }
+
+        materials.append(material_data)
+
+    # --------------------------------------------------------
+    # IDENTIFICAR PISTOLA Y CUCHILLO BAYONETA
+    # --------------------------------------------------------
+
+    pistol = None
+    bayonet = None
+
+    for material in materials:
+        material_type_name = (
+            material["material_type"]
+            .strip()
+            .upper()
+        )
+
+        if (
+            pistol is None
+            and "PISTOLA" in material_type_name
+        ):
+            pistol = material
+
+        if (
+            bayonet is None
+            and (
+                "BAYONETA" in material_type_name
+                or "CUCHILLO" in material_type_name
+            )
+        ):
+            bayonet = material
+
+    # --------------------------------------------------------
+    # RESULTADO
+    # --------------------------------------------------------
+
+    return {
+        "unit": {
+            "id": str(unit.id),
+            "name": unit.name,
+        },
+
+        "personnel": {
+            "id": str(personnel.id),
+            "tin": personnel.tin,
+
+            "full_name": personnel.full_name,
+
+            "rank": (
+                personnel.rank.name
+                if personnel.rank
+                else ""
+            ),
+
+            "rank_abbreviation": (
+                personnel.rank.abbreviation
+                if personnel.rank
+                else ""
+            ),
+
+            "graduation_year": (
+                personnel.graduation_year
+            ),
+
+            "position": (
+                personnel.position.name
+                if personnel.position
+                else ""
+            ),
+
+            "section": (
+                personnel.section.name
+                if personnel.section
+                else ""
+            ),
+        },
+
+        "pistol": pistol,
+        "bayonet": bayonet,
+        "materials": materials,
+        "total_assignments": len(materials),
+    }
 
 
 # ============================================================
@@ -1005,3 +1263,875 @@ def export_general_material_pdf(report, generated_by=""):
     doc.build(story)
     buffer.seek(0)
     return buffer
+
+
+# ============================================================
+# PDF: FILIACIÓN / REGISTRO DE ARMAMENTO DE DOTACIÓN INDIVIDUAL
+# ============================================================
+
+
+# ============================================================
+# PDF: REGISTRO DE ARMAMENTO DE DOTACIÓN INDIVIDUAL
+# ============================================================
+
+
+def export_individual_filiation_pdf(
+    report,
+    generated_by="",
+):
+    """
+    Genera la filiación de armamento individual
+    en formato institucional HOJA CARTA.
+    """
+
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+
+    stream = BytesIO()
+
+    page_width, page_height = LETTER
+
+    pdf = canvas.Canvas(
+        stream,
+        pagesize=LETTER,
+    )
+
+    pdf.setTitle(
+        "Registro de Armamento de Dotación Individual"
+    )
+
+    # ========================================================
+    # UTILIDADES
+    # ========================================================
+
+    def safe(value, default=""):
+        if value in (None, ""):
+            return default
+
+        return str(value)
+
+    def draw_field(
+        label,
+        value,
+        x,
+        y,
+        label_width=48 * mm,
+        font_size=9.5,
+    ):
+        pdf.setFont(
+            "Helvetica-Bold",
+            font_size,
+        )
+
+        pdf.drawString(
+            x,
+            y,
+            label,
+        )
+
+        pdf.drawString(
+            x + label_width - 4 * mm,
+            y,
+            ":",
+        )
+
+        pdf.setFont(
+            "Helvetica",
+            font_size,
+        )
+
+        pdf.drawString(
+            x + label_width,
+            y,
+            safe(value),
+        )
+
+    def get_photo_reader(photo):
+        image_field = getattr(
+            photo,
+            "photo",
+            None,
+        )
+
+        if not image_field:
+            return None
+
+        try:
+            return ImageReader(
+                image_field.path
+            )
+        except Exception:
+            pass
+
+        try:
+            image_field.open("rb")
+
+            return ImageReader(
+                image_field.file
+            )
+        except Exception:
+            return None
+
+    def draw_photo_box(
+        photo,
+        x,
+        y,
+        width,
+        height,
+    ):
+        pdf.setLineWidth(1)
+
+        pdf.rect(
+            x,
+            y,
+            width,
+            height,
+        )
+
+        reader = (
+            get_photo_reader(photo)
+            if photo
+            else None
+        )
+
+        if not reader:
+            pdf.setFont(
+                "Helvetica",
+                7,
+            )
+
+            pdf.drawCentredString(
+                x + width / 2,
+                y + height / 2,
+                "SIN FOTOGRAFÍA",
+            )
+
+            return
+
+        try:
+            image_width, image_height = (
+                reader.getSize()
+            )
+
+            available_width = (
+                width - 1.5 * mm
+            )
+
+            available_height = (
+                height - 1.5 * mm
+            )
+
+            scale = min(
+                available_width / image_width,
+                available_height / image_height,
+            )
+
+            draw_width = (
+                image_width * scale
+            )
+
+            draw_height = (
+                image_height * scale
+            )
+
+            draw_x = (
+                x
+                + (
+                    width
+                    - draw_width
+                ) / 2
+            )
+
+            draw_y = (
+                y
+                + (
+                    height
+                    - draw_height
+                ) / 2
+            )
+
+            pdf.drawImage(
+                reader,
+                draw_x,
+                draw_y,
+                width=draw_width,
+                height=draw_height,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
+
+        except Exception:
+            pdf.setFont(
+                "Helvetica",
+                7,
+            )
+
+            pdf.drawCentredString(
+                x + width / 2,
+                y + height / 2,
+                "FOTOGRAFÍA NO DISPONIBLE",
+            )
+
+    # ========================================================
+    # DATOS
+    # ========================================================
+
+    unit = report.get(
+        "unit",
+        {},
+    )
+
+    personnel = report.get(
+        "personnel",
+        {},
+    )
+
+    pistol = (
+        report.get("pistol")
+        or {}
+    )
+
+    bayonet = (
+        report.get("bayonet")
+        or {}
+    )
+
+    # ========================================================
+    # FOTOGRAFÍAS
+    #
+    # 1 GENERAL
+    # 2 COMPONENTS
+    # 3 SERIAL
+    # ========================================================
+
+    photo_priority = {
+        "GENERAL": 10,
+        "COMPONENTS": 20,
+        "SERIAL": 30,
+        "LEFT_SIDE": 40,
+        "RIGHT_SIDE": 50,
+    }
+
+    photos_found = []
+    seen_photo_ids = set()
+
+    for material in report.get(
+        "materials",
+        [],
+    ):
+        for photo in material.get(
+            "photos",
+            [],
+        ):
+            if getattr(
+                photo,
+                "moment",
+                "",
+            ) != "DELIVERY":
+                continue
+
+            photo_id = str(
+                getattr(
+                    photo,
+                    "id",
+                    id(photo),
+                )
+            )
+
+            if photo_id in seen_photo_ids:
+                continue
+
+            seen_photo_ids.add(
+                photo_id
+            )
+
+            photos_found.append(
+                photo
+            )
+
+    photos_found.sort(
+        key=lambda photo: (
+            photo_priority.get(
+                getattr(
+                    photo,
+                    "photo_type",
+                    "",
+                ),
+                99,
+            ),
+            str(
+                getattr(
+                    photo,
+                    "created_at",
+                    "",
+                )
+            ),
+        )
+    )
+
+    photos = photos_found[:3]
+
+    while len(photos) < 3:
+        photos.append(None)
+
+    # ========================================================
+    # MEDIDAS GENERALES
+    # ========================================================
+
+    left_margin = 28 * mm
+    right_margin = 18 * mm
+
+    photo_width = 50 * mm
+    photo_x = (
+        page_width
+        - right_margin
+        - photo_width
+    )
+
+    text_right = (
+        photo_x - 7 * mm
+    )
+
+    # Centro del bloque izquierdo.
+    # Esto centra ARMADA BOLIVIANA,
+    # BATALLÓN... y BOLIVIA tal como el Word.
+    header_center_x = 55 * mm
+
+    # ========================================================
+    # MEMBRETE
+    # ========================================================
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        9,
+    )
+
+    pdf.drawCentredString(
+        header_center_x,
+        page_height - 17 * mm,
+        "ARMADA BOLIVIANA",
+    )
+
+    pdf.drawCentredString(
+        header_center_x,
+        page_height - 22 * mm,
+        safe(
+            unit.get("name"),
+            "BATALLÓN DE COMANDOS ANFIBIOS",
+        ).upper(),
+    )
+
+    pdf.drawCentredString(
+        header_center_x,
+        page_height - 27 * mm,
+        "BOLIVIA",
+    )
+
+    # ========================================================
+    # TÍTULO
+    # ========================================================
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        12,
+    )
+
+    pdf.drawCentredString(
+        page_width / 2,
+        page_height - 38 * mm,
+        (
+            "REGISTRO DE ARMAMENTO "
+            "DE DOTACIÓN INDIVIDUAL"
+        ),
+    )
+
+    # ========================================================
+    # MARCA DE AGUA BCA
+    # ========================================================
+
+    from pathlib import Path
+
+    watermark_path = (
+        Path(__file__).resolve().parent
+        / "assets"
+        / "bca_watermark.png"
+    )
+
+    if watermark_path.exists():
+        try:
+            watermark_width = 92 * mm
+            watermark_height = 92 * mm
+
+            watermark_x = 65 * mm
+            watermark_y = 95 * mm
+
+            pdf.saveState()
+
+            pdf.drawImage(
+                str(watermark_path),
+                watermark_x,
+                watermark_y,
+                width=watermark_width,
+                height=watermark_height,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
+
+            pdf.restoreState()
+
+        except Exception:
+            pass
+
+    # ========================================================
+    # DATOS PERSONALES
+    # ========================================================
+
+    x = left_margin
+    y = page_height - 50 * mm
+
+    line_step = 8 * mm
+
+    draw_field(
+        "GRADO",
+        (
+            personnel.get(
+                "rank_abbreviation"
+            )
+            or personnel.get(
+                "rank"
+            )
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "NOMBRES Y APELLIDOS",
+        personnel.get(
+            "full_name"
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "AÑO DE EGRESO",
+        personnel.get(
+            "graduation_year"
+        ),
+        x,
+        y,
+    )
+
+    # ========================================================
+    # PISTOLA
+    # ========================================================
+
+    y -= 11 * mm
+
+    draw_field(
+        "Nº DE PISTOLA",
+        pistol.get(
+            "identification_number"
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "MARCA",
+        pistol.get(
+            "manufacturer"
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "INDUSTRIA",
+        pistol.get(
+            "country"
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "MODELO",
+        pistol.get(
+            "model"
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    magazine_count = (
+        pistol.get(
+            "magazine_count",
+            0,
+        )
+    )
+
+    if magazine_count not in (
+        None,
+        "",
+    ):
+        try:
+            magazine_count = (
+                f"{int(magazine_count):02d}"
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            pass
+
+    draw_field(
+        "Nº DE CARGADORES",
+        magazine_count,
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "OBSERVACIONES",
+        (
+            pistol.get(
+                "observations"
+            )
+            or "S/O."
+        ),
+        x,
+        y,
+    )
+
+    # ========================================================
+    # CUCHILLO BAYONETA
+    # ========================================================
+
+    y -= 13 * mm
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        10,
+    )
+
+    pdf.drawString(
+        x,
+        y,
+        "CUCHILLO BAYONETA",
+    )
+
+    y -= 9 * mm
+
+    draw_field(
+        "NÚMERO",
+        bayonet.get(
+            "identification_number"
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "MODELO",
+        bayonet.get(
+            "model"
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "INDUSTRIA",
+        bayonet.get(
+            "country"
+        ),
+        x,
+        y,
+    )
+
+    y -= line_step
+
+    draw_field(
+        "OBSERVACIONES",
+        (
+            bayonet.get(
+                "observations"
+            )
+            or "S/O."
+        ),
+        x,
+        y,
+    )
+
+    # ========================================================
+    # FOTOGRAFÍAS
+    # ========================================================
+
+    photo_top = (
+        page_height - 45 * mm
+    )
+
+    top_photo_height = 47 * mm
+    middle_photo_height = 34 * mm
+    bottom_photo_height = 37 * mm
+
+    # FOTO 1
+    photo1_y = (
+        photo_top
+        - top_photo_height
+    )
+
+    draw_photo_box(
+        photos[0],
+        photo_x,
+        photo1_y,
+        photo_width,
+        top_photo_height,
+    )
+
+    # FOTO 2
+    photo2_y = (
+        photo1_y
+        - middle_photo_height
+    )
+
+    draw_photo_box(
+        photos[1],
+        photo_x,
+        photo2_y,
+        photo_width,
+        middle_photo_height,
+    )
+
+    # FOTO 3
+    photo3_y = (
+        photo2_y
+        - bottom_photo_height
+    )
+
+    draw_photo_box(
+        photos[2],
+        photo_x,
+        photo3_y,
+        photo_width,
+        bottom_photo_height,
+    )
+
+    # ========================================================
+    # TABLA DE FIRMAS
+    # ========================================================
+
+    table_x = left_margin
+    table_width = (
+        page_width
+        - left_margin
+        - right_margin
+    )
+
+    col_width = (
+        table_width / 3
+    )
+
+    table_bottom = 34 * mm
+    table_top = 102 * mm
+
+    middle_y = 63 * mm
+
+    # Marco exterior
+
+    pdf.setLineWidth(0.8)
+
+    pdf.rect(
+        table_x,
+        table_bottom,
+        table_width,
+        table_top - table_bottom,
+    )
+
+    # Columnas
+
+    pdf.line(
+        table_x + col_width,
+        table_bottom,
+        table_x + col_width,
+        table_top,
+    )
+
+    pdf.line(
+        table_x + 2 * col_width,
+        table_bottom,
+        table_x + 2 * col_width,
+        table_top,
+    )
+
+    # División horizontal
+
+    pdf.line(
+        table_x,
+        middle_y,
+        table_x + table_width,
+        middle_y,
+    )
+
+    # ========================================================
+    # FIRMA / ACLARACIÓN / FECHA
+    # ========================================================
+
+    headers = [
+        "FIRMA",
+        "ACLARACIÓN",
+        "FECHA",
+    ]
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        9,
+    )
+
+    for index, header in enumerate(
+        headers
+    ):
+        center_x = (
+            table_x
+            + (
+                index
+                * col_width
+            )
+            + col_width / 2
+        )
+
+        pdf.drawCentredString(
+            center_x,
+            middle_y + 3 * mm,
+            header,
+        )
+
+    # ========================================================
+    # RESPONSABLES
+    #
+    # Por ahora dejamos espacio para que se firme.
+    # Luego los cargaremos dinámicamente desde el sistema.
+    # ========================================================
+
+    roles = [
+        [
+            "RESPONSABLE DE LA VERIFICACIÓN",
+        ],
+        [
+            "JEFE DE LA SECCIÓN IV",
+            '"LOGÍSTICA"',
+        ],
+        [
+            "CMDTE. DEL BCA.",
+        ],
+    ]
+
+    for index, role_lines in enumerate(
+        roles
+    ):
+        center_x = (
+            table_x
+            + (
+                index
+                * col_width
+            )
+            + col_width / 2
+        )
+
+        start_y = (
+            table_bottom
+            + 8 * mm
+        )
+
+        pdf.setFont(
+            "Helvetica-Bold",
+            6.5,
+        )
+
+        for role_line in role_lines:
+            pdf.drawCentredString(
+                center_x,
+                start_y,
+                role_line,
+            )
+
+            start_y -= 3.5 * mm
+
+    # ========================================================
+    # DECLARACIÓN INFERIOR
+    # ========================================================
+
+    declaration_height = 9 * mm
+
+    pdf.rect(
+        table_x,
+        table_bottom
+        - declaration_height,
+        table_width,
+        declaration_height,
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        8,
+    )
+
+    pdf.drawCentredString(
+        table_x
+        + table_width / 2,
+        table_bottom
+        - 6 * mm,
+        (
+            "Firmo el presente documento, como fe de la "
+            "veracidad de los datos declarados."
+        ),
+    )
+
+    # ========================================================
+    # AUDITORÍA
+    # ========================================================
+
+    if generated_by:
+        pdf.setFont(
+            "Helvetica",
+            5,
+        )
+
+        pdf.drawRightString(
+            page_width
+            - right_margin,
+            8 * mm,
+            (
+                "Generado por FORTALEZA - "
+                f"{generated_by}"
+            ),
+        )
+
+    pdf.showPage()
+    pdf.save()
+
+    stream.seek(0)
+
+    return stream
