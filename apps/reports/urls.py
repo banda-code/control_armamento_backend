@@ -6,6 +6,8 @@ from .views import (
     ArmamentReportOptionsView,
     GeneralMaterialExportView,
     GeneralMaterialPreviewView,
+    IndividualFiliationExportView,
+    IndividualFiliationConfigView,
 )
 
 
@@ -37,5 +39,15 @@ urlpatterns = [
         "general/export/",
         GeneralMaterialExportView.as_view(),
         name="general-export",
+    ),
+    path(
+        "individual-filiation/export/",
+        IndividualFiliationExportView.as_view(),
+        name="individual-filiation-export",
+    ),
+    path(
+        "individual-filiation/config/",
+        IndividualFiliationConfigView.as_view(),
+        name="individual-filiation-config",
     ),
 ]

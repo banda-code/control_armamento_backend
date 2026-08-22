@@ -18,6 +18,7 @@ from apps.inventory.models import (
     StockBatch,
 )
 from apps.organization.models import Unit
+from apps.reports.models import IndividualFiliationConfig
 
 
 CATEGORY_ORDER = {
@@ -237,6 +238,61 @@ def build_individual_filiation_report(
     # RESULTADO
     # --------------------------------------------------------
 
+    # ========================================================
+    # FIRMANTES CONFIGURADOS PARA LA UNIDAD
+    # ========================================================
+
+    filiation_config = (
+        IndividualFiliationConfig.objects
+        .filter(unit=unit)
+        .select_related(
+            "verification_responsible__rank",
+            "verification_responsible__position",
+            "logistics_chief__rank",
+            "logistics_chief__position",
+            "unit_commander__rank",
+            "unit_commander__position",
+        )
+        .first()
+    )
+
+    def signer_data(person):
+        if not person:
+            return None
+
+        return {
+            "id": str(person.id),
+            "full_name": person.full_name,
+            "rank": (
+                person.rank.abbreviation
+                if person.rank
+                else ""
+            ),
+            "position": (
+                person.position.name
+                if person.position
+                else ""
+            ),
+        }
+
+    signatories = {
+        "verification_responsible": signer_data(
+            filiation_config.verification_responsible
+            if filiation_config
+            else None
+        ),
+        "logistics_chief": signer_data(
+            filiation_config.logistics_chief
+            if filiation_config
+            else None
+        ),
+        "unit_commander": signer_data(
+            filiation_config.unit_commander
+            if filiation_config
+            else None
+        ),
+    }
+
     return {
         "unit": {
             "id": str(unit.id),
@@ -282,6 +338,7 @@ def build_individual_filiation_report(
         "bayonet": bayonet,
         "materials": materials,
         "total_assignments": len(materials),
+        "signatories": signatories,
     }
 
 
@@ -2029,55 +2086,116 @@ def export_individual_filiation_pdf(
         )
 
     # ========================================================
-    # RESPONSABLES
-    #
-    # Por ahora dejamos espacio para que se firme.
-    # Luego los cargaremos dinámicamente desde el sistema.
+    # RESPONSABLES / FIRMANTES
     # ========================================================
 
-    roles = [
-        [
-            "RESPONSABLE DE LA VERIFICACIÓN",
-        ],
-        [
-            "JEFE DE LA SECCIÓN IV",
-            '"LOGÍSTICA"',
-        ],
-        [
-            "CMDTE. DEL BCA.",
-        ],
+    signatories = report.get(
+        "signatories",
+        {},
+    )
+
+    verification = signatories.get(
+        "verification_responsible"
+    )
+
+    logistics = signatories.get(
+        "logistics_chief"
+    )
+
+    commander = signatories.get(
+        "unit_commander"
+    )
+
+    signature_data = [
+        {
+            "person": verification,
+            "role": [
+                "RESPONSABLE DE LA VERIFICACIÓN",
+            ],
+        },
+        {
+            "person": logistics,
+            "role": [
+                "JEFE DE LA SECCIÓN IV",
+                '"LOGÍSTICA"',
+            ],
+        },
+        {
+            "person": commander,
+            "role": [
+                "CMDTE. DEL BCA.",
+            ],
+        },
     ]
 
-    for index, role_lines in enumerate(
-        roles
-    ):
+    for index, item in enumerate(signature_data):
+
         center_x = (
             table_x
-            + (
-                index
-                * col_width
-            )
+            + (index * col_width)
             + col_width / 2
         )
 
-        start_y = (
-            table_bottom
-            + 8 * mm
-        )
+        person = item["person"]
+
+        # ----------------------------------------------------
+        # GRADO Y NOMBRE DEL FIRMANTE
+        # ----------------------------------------------------
+
+        if person:
+            rank = safe(
+                person.get("rank")
+            ).upper()
+
+            full_name = safe(
+                person.get("full_name")
+            ).upper()
+
+            name_y = table_bottom + 18 * mm
+
+            pdf.setFont(
+                "Helvetica-Bold",
+                7,
+            )
+
+            if rank:
+                pdf.drawCentredString(
+                    center_x,
+                    name_y + 4 * mm,
+                    rank,
+                )
+
+            pdf.setFont(
+                "Helvetica",
+                6.5,
+            )
+
+            pdf.drawCentredString(
+                center_x,
+                name_y,
+                full_name,
+            )
+
+        # ----------------------------------------------------
+        # FUNCIÓN QUE CUMPLE EN EL DOCUMENTO
+        # ----------------------------------------------------
+
+        role_y = table_bottom + 8 * mm
 
         pdf.setFont(
             "Helvetica-Bold",
             6.5,
         )
 
-        for role_line in role_lines:
+        for role_line in item["role"]:
             pdf.drawCentredString(
                 center_x,
-                start_y,
+                role_y,
                 role_line,
             )
 
-            start_y -= 3.5 * mm
+            role_y -= 3.5 * mm
+
 
     # ========================================================
     # DECLARACIÓN INFERIOR
