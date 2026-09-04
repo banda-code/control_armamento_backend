@@ -8,6 +8,7 @@ from .views import (
     GeneralMaterialPreviewView,
     IndividualFiliationExportView,
     IndividualFiliationConfigView,
+    IndividualDeliveryReceiptExportView,
 )
 
 
@@ -49,5 +50,10 @@ urlpatterns = [
         "individual-filiation/config/",
         IndividualFiliationConfigView.as_view(),
         name="individual-filiation-config",
+    ),
+    path(
+        "individual-delivery-receipt/export/",
+        IndividualDeliveryReceiptExportView.as_view(),
+        name="individual-delivery-receipt-export",
     ),
 ]

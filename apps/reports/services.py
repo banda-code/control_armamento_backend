@@ -1,5 +1,6 @@
 from collections import defaultdict
 from io import BytesIO
+from pathlib import Path
 
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Sum
@@ -20,6 +21,12 @@ from apps.inventory.models import (
 from apps.organization.models import Unit
 from apps.reports.models import IndividualFiliationConfig
 
+
+from reportlab.lib.enums import TA_JUSTIFY
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Paragraph
 
 CATEGORY_ORDER = {
     "ARMAMENTO": 10,
@@ -340,6 +347,156 @@ def build_individual_filiation_report(
         "total_assignments": len(materials),
         "signatories": signatories,
     }
+
+# ============================================================
+# ACTA DE ENTREGA Y RECEPCIÓN - DOTACIÓN INDIVIDUAL
+# ============================================================
+
+
+def build_individual_delivery_receipt_report(
+    unit,
+    personnel_id,
+    *,
+    document_number="",
+    place="",
+    act_date=None,
+    act_time=None,
+    reason="",
+    destination="",
+    movement_type="DELIVERY",
+):
+    """
+    Construye los datos del Acta de Entrega y Recepción
+    reutilizando la información ya obtenida para la
+    filiación individual.
+
+    No duplica consultas de:
+    - personal
+    - pistola
+    - cuchillo bayoneta
+    - cargadores/componentes
+    - firmantes configurados
+    """
+
+    # --------------------------------------------------------
+    # BASE YA EXISTENTE
+    # --------------------------------------------------------
+
+    base = build_individual_filiation_report(
+        unit,
+        personnel_id,
+    )
+
+    # --------------------------------------------------------
+    # INSTITUCIÓN / ORGANIZACIÓN
+    # --------------------------------------------------------
+
+    institution = getattr(
+        unit,
+        "institution",
+        None,
+    )
+
+    organization = {
+        "institution_id": (
+            str(institution.id)
+            if institution
+            else None
+        ),
+        "institution_name": (
+            institution.name
+            if institution
+            else ""
+        ),
+        "institution_acronym": (
+            institution.acronym
+            if institution
+            else ""
+        ),
+        "unit_id": str(unit.id),
+        "unit_name": unit.name,
+        "unit_acronym": (
+            getattr(unit, "acronym", "")
+            or ""
+        ),
+        "unit_code": (
+            getattr(unit, "code", "")
+            or ""
+        ),
+    }
+
+    # --------------------------------------------------------
+    # TIPO DE MOVIMIENTO DEL ACTA
+    # --------------------------------------------------------
+
+    normalized_movement_type = (
+        str(movement_type)
+        .strip()
+        .upper()
+    )
+
+    if normalized_movement_type not in {
+        "DELIVERY",
+        "RECEIPT",
+    }:
+        raise ValidationError(
+            "El tipo de acta debe ser "
+            "DELIVERY o RECEIPT."
+        )
+
+    # --------------------------------------------------------
+    # DATOS PROPIOS DEL ACTA
+    # --------------------------------------------------------
+
+    act = {
+        "document_number": (
+            document_number or ""
+        ),
+        "place": (
+            place or ""
+        ),
+        "date": act_date,
+        "time": act_time,
+        "reason": (
+            reason or ""
+        ),
+        "destination": (
+            destination or ""
+        ),
+        "movement_type": (
+            normalized_movement_type
+        ),
+    }
+
+    # --------------------------------------------------------
+    # RESULTADO
+    # --------------------------------------------------------
+
+    return {
+        "organization": organization,
+
+        "unit": base["unit"],
+
+        "personnel": base["personnel"],
+
+        "pistol": base["pistol"],
+
+        "bayonet": base["bayonet"],
+
+        "materials": base["materials"],
+
+        "total_assignments": (
+            base["total_assignments"]
+        ),
+
+        "signatories": (
+            base["signatories"]
+        ),
+
+        "act": act,
+    }
+
+
 
 
 # ============================================================
@@ -1354,6 +1511,39 @@ def export_individual_filiation_pdf(
         stream,
         pagesize=LETTER,
     )
+    # ========================================================
+    # FUENTES ARIAL
+    # ========================================================
+
+    arial_regular = Path(
+        "C:/Windows/Fonts/arial.ttf"
+    )
+
+    arial_bold = Path(
+        "C:/Windows/Fonts/arialbd.ttf"
+    )
+
+    if arial_regular.exists():
+        pdfmetrics.registerFont(
+            TTFont(
+                "Arial",
+                str(arial_regular),
+            )
+        )
+        normal_font = "Arial"
+    else:
+        normal_font = "Helvetica"
+
+    if arial_bold.exists():
+        pdfmetrics.registerFont(
+            TTFont(
+                "Arial-Bold",
+                str(arial_bold),
+            )
+        )
+        bold_font = "Arial-Bold"
+    else:
+        bold_font = "Helvetica-Bold"
 
     pdf.setTitle(
         "Registro de Armamento de Dotación Individual"
@@ -1654,7 +1844,7 @@ def export_individual_filiation_pdf(
     # Centro del bloque izquierdo.
     # Esto centra ARMADA BOLIVIANA,
     # BATALLÓN... y BOLIVIA tal como el Word.
-    header_center_x = 55 * mm
+    header_center_x = 63 * mm
 
     # ========================================================
     # MEMBRETE
@@ -1708,7 +1898,6 @@ def export_individual_filiation_pdf(
     # MARCA DE AGUA BCA
     # ========================================================
 
-    from pathlib import Path
 
     watermark_path = (
         Path(__file__).resolve().parent
@@ -2116,8 +2305,7 @@ def export_individual_filiation_pdf(
         {
             "person": logistics,
             "role": [
-                "JEFE DE LA SECCIÓN IV",
-                '"LOGÍSTICA"',
+                'JEFE DE LA SECCIÓN IV "LOGÍSTICA"',
             ],
         },
         {
@@ -2151,40 +2339,38 @@ def export_individual_filiation_pdf(
                 person.get("full_name")
             ).upper()
 
-            name_y = table_bottom + 18 * mm
-
-            pdf.setFont(
-                "Helvetica-Bold",
-                7,
+            # Grado y nombre en una sola línea
+            signer_name = " ".join(
+                value
+                for value in [
+                    rank,
+                    full_name,
+                ]
+                if value
             )
 
-            if rank:
-                pdf.drawCentredString(
-                    center_x,
-                    name_y + 4 * mm,
-                    rank,
-                )
+            name_y = table_bottom + 5.3 * mm
 
             pdf.setFont(
                 "Helvetica",
-                6.5,
+                5.5,
             )
 
             pdf.drawCentredString(
                 center_x,
                 name_y,
-                full_name,
+                signer_name,
             )
 
         # ----------------------------------------------------
         # FUNCIÓN QUE CUMPLE EN EL DOCUMENTO
         # ----------------------------------------------------
 
-        role_y = table_bottom + 8 * mm
+        role_y = table_bottom + 2.1 * mm
 
         pdf.setFont(
             "Helvetica-Bold",
-            6.5,
+            5.4,
         )
 
         for role_line in item["role"]:
@@ -2194,7 +2380,7 @@ def export_individual_filiation_pdf(
                 role_line,
             )
 
-            role_y -= 3.5 * mm
+            role_y -= 2.5 * mm
 
 
     # ========================================================
@@ -2246,6 +2432,843 @@ def export_individual_filiation_pdf(
                 f"{generated_by}"
             ),
         )
+
+    pdf.showPage()
+    pdf.save()
+
+    stream.seek(0)
+
+    return stream
+
+
+
+
+# ============================================================
+# PDF: ACTA DE ENTREGA Y RECEPCIÓN - DOTACIÓN INDIVIDUAL
+# ============================================================
+
+
+def export_individual_delivery_receipt_pdf(
+    report,
+    generated_by="",
+):
+    from datetime import date, datetime, time
+
+    from reportlab.lib.enums import TA_JUSTIFY
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table, TableStyle
+
+    stream = BytesIO()
+
+    page_width, page_height = LETTER
+
+    pdf = canvas.Canvas(
+        stream,
+        pagesize=LETTER,
+    )
+    # ========================================================
+    # FUENTES DEL ACTA
+    # ========================================================
+
+    normal_font = "Helvetica"
+    bold_font = "Helvetica-Bold"
+
+    arial_regular = Path(
+        "C:/Windows/Fonts/arial.ttf"
+    )
+
+    arial_bold = Path(
+        "C:/Windows/Fonts/arialbd.ttf"
+    )
+
+    if arial_regular.exists():
+        if "Arial" not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(
+                TTFont(
+                    "Arial",
+                    str(arial_regular),
+                )
+            )
+
+        normal_font = "Arial"
+
+    if arial_bold.exists():
+        if "Arial-Bold" not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(
+                TTFont(
+                    "Arial-Bold",
+                    str(arial_bold),
+                )
+            )
+
+        bold_font = "Arial-Bold"
+
+    pdf.setTitle(
+        "Acta de Entrega y Recepción"
+    )
+
+    # --------------------------------------------------------
+    # UTILIDADES
+    # --------------------------------------------------------
+
+    def safe(value, default=""):
+        if value in (None, ""):
+            return default
+
+        return str(value)
+
+    def draw_justified_paragraph(
+        text,
+        x,
+        y,
+        width,
+        font_size=12,
+    ):
+        style = ParagraphStyle(
+            name="ActaJustificada",
+            fontName=normal_font,
+            fontSize=font_size,
+            leading=14,
+            alignment=TA_JUSTIFY,
+            spaceAfter=0,
+            spaceBefore=0,
+        )
+
+        paragraph = Paragraph(
+            safe(text),
+            style,
+        )
+
+        _, height = paragraph.wrap(
+            width,
+            100 * mm,
+        )
+
+        paragraph.drawOn(
+            pdf,
+            x,
+            y - height,
+        )
+
+        return y - height
+
+    def spanish_date(value):
+        if not value:
+            return ""
+
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(
+                    value
+                ).date()
+            except ValueError:
+                return value
+
+        months = [
+            "",
+            "enero",
+            "febrero",
+            "marzo",
+            "abril",
+            "mayo",
+            "junio",
+            "julio",
+            "agosto",
+            "septiembre",
+            "octubre",
+            "noviembre",
+            "diciembre",
+        ]
+
+        return (
+            f"{value.day} de "
+            f"{months[value.month]} de "
+            f"{value.year}"
+        )
+
+    def format_time(value):
+        if not value:
+            return ""
+
+        if isinstance(value, str):
+            try:
+                value = time.fromisoformat(
+                    value
+                )
+            except ValueError:
+                return value
+
+        return value.strftime("%H:%M")
+
+    # --------------------------------------------------------
+    # DATOS
+    # --------------------------------------------------------
+
+    organization = (
+        report.get("organization", {})
+    )
+
+    personnel = (
+        report.get("personnel", {})
+    )
+
+    pistol = (
+        report.get("pistol") or {}
+    )
+
+    bayonet = (
+        report.get("bayonet") or {}
+    )
+
+    signatories = (
+        report.get("signatories", {})
+    )
+
+    act = report.get(
+        "act",
+        {},
+    )
+
+    institution_name = safe(
+        organization.get(
+            "institution_name"
+        ),
+        "ARMADA BOLIVIANA",
+    ).upper()
+
+    unit_name = safe(
+        organization.get(
+            "unit_name"
+        )
+    ).upper()
+
+    unit_acronym = safe(
+        organization.get(
+            "unit_acronym"
+        )
+    ).upper()
+
+    rank = safe(
+        personnel.get(
+            "rank_abbreviation"
+        )
+    ).upper()
+
+    full_name = safe(
+        personnel.get(
+            "full_name"
+        )
+    ).upper()
+
+    # --------------------------------------------------------
+    # RESERVADO
+    # --------------------------------------------------------
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        7,
+    )
+
+    pdf.drawCentredString(
+        page_width / 2,
+        page_height - 10 * mm,
+        "RESERVADO",
+    )
+
+    pdf.drawCentredString(
+        page_width / 2,
+        8 * mm,
+        "RESERVADO",
+    )
+
+    pdf.setFont(
+        normal_font,
+        7,
+    )
+
+    pdf.drawCentredString(
+        page_width / 2,
+        5 * mm,
+        "1 - 1",
+    )
+
+    pdf.setFont(
+        normal_font,
+        7,
+    )
+
+    pdf.drawRightString(
+        page_width - 18 * mm,
+        page_height - 10 * mm,
+        "1 - 1",
+    )
+
+    # --------------------------------------------------------
+    # MEMBRETE IZQUIERDO
+    # --------------------------------------------------------
+
+    header_center_x = 63 * mm
+
+    pdf.setFont(
+        bold_font,
+        10,
+    )
+
+    pdf.drawCentredString(
+        header_center_x,
+        page_height - 18 * mm,
+        institution_name,
+    )
+
+    pdf.drawCentredString(
+        header_center_x,
+        page_height - 23 * mm,
+        unit_name,
+    )
+
+    pdf.drawCentredString(
+        header_center_x,
+        page_height - 28 * mm,
+        "BOLIVIA",
+    )
+
+    # --------------------------------------------------------
+    # TÍTULO
+    # --------------------------------------------------------
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        12,
+    )
+
+    pdf.drawCentredString(
+        page_width / 2,
+        page_height - 42 * mm,
+        "ACTA DE ENTREGA Y RECEPCIÓN",
+    )
+
+    document_number = safe(
+        act.get("document_number")
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        8.5,
+    )
+
+    document_label = (
+        f'Secc. IV Log. "Mat. Bel" '
+        f"N° {document_number}"
+        if document_number
+        else 'Secc. IV Log. "Mat. Bel"'
+    )
+
+    pdf.drawRightString(
+        page_width - 18 * mm,
+        page_height - 48 * mm,
+        document_label,
+    )
+
+    # --------------------------------------------------------
+    # PÁRRAFO DEL ACTA
+    # --------------------------------------------------------
+
+    place = safe(
+        act.get("place")
+    )
+
+    date_text = spanish_date(
+        act.get("date")
+    )
+
+    time_text = format_time(
+        act.get("time")
+    )
+
+    reason = safe(
+        act.get("reason")
+    )
+
+    destination = safe(
+        act.get("destination")
+    )
+
+    rank_and_name = " ".join(
+        value
+        for value in [
+            rank,
+            full_name,
+        ]
+        if value
+    )
+
+    narrative = (
+        f"En la localidad de {place}, "
+        f"a fecha {date_text}, "
+        f"siendo las {time_text}, "
+        f"en el Pañol de Armamento de "
+        f"{unit_name}, se realizó la entrega "
+        f"y recepción de armamento y cuchillo "
+        f"bayoneta de dotación individual "
+        f"perteneciente al {rank_and_name}"
+    )
+
+    if reason:
+        narrative += (
+            f", por motivo {reason}"
+        )
+
+    if destination:
+        narrative += (
+            f", con destino a {destination}"
+        )
+
+    narrative += (
+        ", de acuerdo al siguiente detalle:"
+    )
+
+    y = page_height - 57 * mm
+
+    # El párrafo tendrá exactamente el mismo ancho que la tabla
+    paragraph_x = 28 * mm
+    paragraph_width = 173 * mm
+
+    y = draw_justified_paragraph(
+        narrative,
+        paragraph_x,
+        y,
+        paragraph_width,
+        font_size=12,
+    )
+
+    # --------------------------------------------------------
+    # TABLA DE MATERIAL
+    # --------------------------------------------------------
+
+    y -= 4 * mm
+
+    pistol_brand = safe(
+        pistol.get("manufacturer"),
+        "S/M",
+    ).upper()
+
+    pistol_model = safe(
+        pistol.get("model"),
+        "S/M",
+    ).upper()
+
+    pistol_number = safe(
+        pistol.get("identification_number")
+    ).upper()
+
+    pistol_magazines = str(
+        pistol.get("magazine_count", 0)
+    ).zfill(2)
+
+    pistol_observations = safe(
+        pistol.get("observations"),
+        "S/O.",
+    ).upper()
+
+    bayonet_brand = safe(
+        bayonet.get("manufacturer"),
+        safe(
+            bayonet.get("model"),
+            "S/M",
+        ),
+    ).upper()
+
+    bayonet_number = safe(
+        bayonet.get("identification_number")
+    ).upper()
+
+    bayonet_observations = safe(
+        bayonet.get("observations"),
+        "S/O.",
+    ).upper()
+
+    # --------------------------------------------------------
+    # ANCHOS
+    # Total = 181 mm
+    # --------------------------------------------------------
+
+    col_widths = [
+        9 * mm,   # N°
+        20 * mm,  # MARCA PISTOLA
+        20 * mm,  # MODELO
+        23 * mm,  # NRO.
+        17 * mm,  # N° DE CARG.
+        16 * mm,  # OBS. PISTOLA
+        21 * mm,  # MARCA BAYONETA
+        23 * mm,  # N° BAYONETA
+        24 * mm,  # OBS. BAYONETA
+    ]
+
+    table_data = [
+        [
+            "N°",
+            "PISTOLA",
+            "",
+            "",
+            "",
+            "",
+            "CUCHILLO BAYONETA",
+            "",
+            "",
+        ],
+        [
+            "",
+            "MARCA",
+            "MODELO",
+            "NRO.",
+            "N° DE CARG.",
+            "OBS.",
+            "MARCA",
+            "N°",
+            "OBS.",
+        ],
+        [
+            "1.",
+            pistol_brand,
+            pistol_model,
+            pistol_number,
+            pistol_magazines,
+            pistol_observations,
+            bayonet_brand,
+            bayonet_number,
+            bayonet_observations,
+        ],
+    ]
+
+    material_table = Table(
+        table_data,
+        colWidths=col_widths,
+        rowHeights=[
+            7 * mm,
+            8 * mm,
+            8 * mm,
+        ],
+    )
+
+    material_table.setStyle(
+        TableStyle(
+            [
+                # N° ocupa las dos filas de encabezado
+                (
+                    "SPAN",
+                    (0, 0),
+                    (0, 1),
+                ),
+
+                # PISTOLA ocupa sus cinco columnas
+                (
+                    "SPAN",
+                    (1, 0),
+                    (5, 0),
+                ),
+
+                # CUCHILLO BAYONETA ocupa sus tres columnas
+                (
+                    "SPAN",
+                    (6, 0),
+                    (8, 0),
+                ),
+
+                # Bordes
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.8,
+                    colors.black,
+                ),
+
+                # Centrado
+                (
+                    "ALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "CENTER",
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "MIDDLE",
+                ),
+
+                # Encabezados
+                (
+                    "FONTNAME",
+                    (0, 0),
+                    (-1, 1),
+                    bold_font,
+                ),
+                (
+                    "FONTSIZE",
+                    (0, 0),
+                    (-1, 1),
+                    8,
+                ),
+
+                # Datos
+                (
+                    "FONTNAME",
+                    (0, 2),
+                    (-1, 2),
+                    normal_font,
+                ),
+                (
+                    "FONTSIZE",
+                    (0, 2),
+                    (-1, 2),
+                    8,
+                ),
+
+                # Espaciado
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    2,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    2,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    2,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    2,
+                ),
+            ]
+        )
+    )
+
+    table_width, table_height = material_table.wrap(
+        page_width,
+        page_height,
+    )
+
+    # Centrar toda la tabla en la hoja
+    table_x = 28 * mm
+
+    table_bottom = (
+        y - table_height
+    )
+
+    material_table.drawOn(
+        pdf,
+        table_x,
+        table_bottom,
+    )
+
+    # --------------------------------------------------------
+    # TEXTO DE CONSTANCIA
+    # --------------------------------------------------------
+
+    y = table_bottom - 9 * mm
+
+    pdf.setFont(
+        "Helvetica",
+        9,
+    )
+
+    pdf.drawString(
+        25 * mm,
+        y,
+        (
+            "Para constancia, firman al pie "
+            "del presente los siguientes:"
+        ),
+    )
+
+    # --------------------------------------------------------
+    # FIRMAS
+    # --------------------------------------------------------
+
+    verification = (
+        signatories.get(
+            "verification_responsible"
+        )
+    )
+
+    commander = (
+        signatories.get(
+            "unit_commander"
+        )
+    )
+
+    # Encabezados de firma
+    signature_top = y - 18 * mm
+
+    left_center = 65 * mm
+    right_center = 150 * mm
+
+    pdf.setFont(
+        bold_font,
+        10,
+    )
+
+    pdf.drawCentredString(
+        left_center,
+        signature_top,
+        "ENTREGUE CONFORME",
+    )
+
+    pdf.drawCentredString(
+        right_center,
+        signature_top,
+        "RECIBI CONFORME",
+    )
+
+    # --------------------------------------------------------
+    # FIRMA IZQUIERDA - RESPONSABLE / ENCARGADO DE ARMAMENTO
+    # --------------------------------------------------------
+
+    if verification:
+        verifier_text = " ".join(
+            value
+            for value in [
+                safe(
+                    verification.get(
+                        "rank"
+                    )
+                ).upper(),
+                safe(
+                    verification.get(
+                        "full_name"
+                    )
+                ).upper(),
+            ]
+            if value
+        )
+
+        pdf.setFont(
+            normal_font,
+            9,
+        )
+
+        pdf.drawCentredString(
+            left_center,
+            signature_top - 34 * mm,
+            verifier_text,
+        )
+
+        pdf.setFont(
+            bold_font,
+            9,
+        )
+
+        pdf.drawCentredString(
+            left_center,
+            signature_top - 39 * mm,
+            (
+                f"ENC. DE ARMAMENTO "
+                f"DE {unit_acronym or 'LA UNIDAD'}"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # FIRMA DERECHA - PERSONAL TITULAR DEL ACTA
+    # --------------------------------------------------------
+
+    pdf.setFont(
+        normal_font,
+        9,
+    )
+
+    pdf.drawCentredString(
+        right_center,
+        signature_top - 34 * mm,
+        rank_and_name,
+    )
+
+    personnel_position = safe(
+        personnel.get("position")
+    ).upper()
+
+    if personnel_position:
+        pdf.setFont(
+            bold_font,
+            9,
+        )
+
+        pdf.drawCentredString(
+            right_center,
+            signature_top - 39 * mm,
+            personnel_position,
+        )
+
+    # --------------------------------------------------------
+    # FIRMA CENTRAL - COMANDANTE DE LA UNIDAD
+    # --------------------------------------------------------
+
+    if commander:
+        commander_text = " ".join(
+            value
+            for value in [
+                safe(
+                    commander.get(
+                        "rank"
+                    )
+                ).upper(),
+                safe(
+                    commander.get(
+                        "full_name"
+                    )
+                ).upper(),
+            ]
+            if value
+        )
+
+        commander_y = (
+            signature_top - 78 * mm
+        )
+
+        pdf.setFont(
+            normal_font,
+            9,
+        )
+
+        pdf.drawCentredString(
+            page_width / 2,
+            commander_y,
+            commander_text,
+        )
+
+        pdf.setFont(
+            bold_font,
+            9,
+        )
+
+        commander_role = (
+            f"COMANDANTE DE {unit_name}"
+        )
+
+        pdf.drawCentredString(
+            page_width / 2,
+            commander_y - 5 * mm,
+            commander_role,
+        )
+
+    # La identificación del usuario que genera el documento
+    # debe quedar en la auditoría del sistema, no impresa en el Acta.
 
     pdf.showPage()
     pdf.save()

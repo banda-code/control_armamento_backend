@@ -13,11 +13,13 @@ from .services import (
     build_armament_detail,
     build_general_material_report,
     build_individual_filiation_report,
+    build_individual_delivery_receipt_report,
     export_armament_detail_pdf,
     export_armament_detail_xlsx,
     export_general_material_pdf,
     export_general_material_xlsx,
     export_individual_filiation_pdf,
+    export_individual_delivery_receipt_pdf,
     get_armament_options,
     resolve_report_unit,
 )
@@ -427,6 +429,266 @@ class IndividualFiliationExportView(APIView):
             filename=filename,
             content_type="application/pdf",
         )
+
+
+
+# ============================================================
+# DESCARGA: ACTA DE ENTREGA Y RECEPCIÓN
+# DOTACIÓN INDIVIDUAL
+# ============================================================
+
+
+class IndividualDeliveryReceiptExportView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        personnel_id = request.data.get("personnel")
+
+        if not personnel_id:
+            return Response(
+                {
+                    "detail": (
+                        "Debe seleccionar el personal "
+                        "para generar el acta."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        document_number = (
+            request.data.get("document_number")
+            or ""
+        )
+
+        place = (
+            request.data.get("place")
+            or ""
+        )
+
+        act_date = (
+            request.data.get("date")
+            or None
+        )
+
+        act_time = (
+            request.data.get("time")
+            or None
+        )
+
+        reason = (
+            request.data.get("reason")
+            or ""
+        )
+
+        destination = (
+            request.data.get("destination")
+            or ""
+        )
+
+        movement_type = (
+            request.data.get("movement_type")
+            or "DELIVERY"
+        )
+
+        # --------------------------------------------------------
+        # VALIDACIONES BÁSICAS
+        # --------------------------------------------------------
+
+        if not document_number:
+            return Response(
+                {
+                    "detail": (
+                        "Debe ingresar el número del acta."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not place:
+            return Response(
+                {
+                    "detail": (
+                        "Debe ingresar el lugar del acta."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not act_date:
+            return Response(
+                {
+                    "detail": (
+                        "Debe ingresar la fecha del acta."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not act_time:
+            return Response(
+                {
+                    "detail": (
+                        "Debe ingresar la hora del acta."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            requested_unit_id = request.data.get(
+                "unit"
+            )
+
+            # ----------------------------------------------------
+            # USUARIO CON ALCANCE GLOBAL
+            #
+            # Si no envió una unidad, obtenemos automáticamente
+            # la unidad del personal seleccionado.
+            # ----------------------------------------------------
+
+            if (
+                getattr(
+                    request.user,
+                    "has_global_scope",
+                    False,
+                )
+                and not requested_unit_id
+            ):
+                personnel_unit_id = (
+                    Personnel.objects
+                    .filter(
+                        pk=personnel_id,
+                        is_active=True,
+                    )
+                    .values_list(
+                        "unit_id",
+                        flat=True,
+                    )
+                    .first()
+                )
+
+                if not personnel_unit_id:
+                    raise DjangoValidationError(
+                        "El personal seleccionado no existe "
+                        "o no tiene una unidad asignada."
+                    )
+
+                requested_unit_id = (
+                    personnel_unit_id
+                )
+
+            # ----------------------------------------------------
+            # RESOLVER UNIDAD SEGÚN PERMISOS
+            # ----------------------------------------------------
+
+            unit = resolve_report_unit(
+                request.user,
+                requested_unit_id,
+            )
+
+            # ----------------------------------------------------
+            # CONSTRUIR ACTA
+            # ----------------------------------------------------
+
+            report = (
+                build_individual_delivery_receipt_report(
+                    unit,
+                    personnel_id,
+                    document_number=document_number,
+                    place=place,
+                    act_date=act_date,
+                    act_time=act_time,
+                    reason=reason,
+                    destination=destination,
+                    movement_type=movement_type,
+                )
+            )
+
+        except DjangoValidationError as exc:
+            return _validation_response(exc)
+
+        # --------------------------------------------------------
+        # GENERAR PDF
+        # --------------------------------------------------------
+
+        generated_by = _generated_by(
+            request.user
+        )
+
+        stream = (
+            export_individual_delivery_receipt_pdf(
+                report,
+                generated_by,
+            )
+        )
+
+        # --------------------------------------------------------
+        # NOMBRE DEL ARCHIVO
+        # --------------------------------------------------------
+
+        full_name = (
+            report.get("personnel", {})
+            .get(
+                "full_name",
+                "personal",
+            )
+        )
+
+        safe_name = (
+            full_name.strip()
+            .replace(" ", "_")
+            .replace("/", "-")
+            .replace("\\", "-")
+        )
+
+        filename = (
+            f"acta_entrega_recepcion_"
+            f"{safe_name}.pdf"
+        )
+
+        # --------------------------------------------------------
+        # AUDITORÍA
+        # --------------------------------------------------------
+
+        log_event(
+            request=request,
+            action=(
+                "INDIVIDUAL_DELIVERY_RECEIPT_EXPORTED"
+            ),
+            actor=request.user,
+            target=unit,
+            unit=unit,
+            metadata={
+                "report": (
+                    "INDIVIDUAL_DELIVERY_RECEIPT"
+                ),
+                "personnel_id": (
+                    personnel_id
+                ),
+                "personnel_name": (
+                    full_name
+                ),
+                "document_number": (
+                    document_number
+                ),
+                "place": place,
+                "date": act_date,
+                "time": act_time,
+                "reason": reason,
+                "destination": destination,
+                "movement_type": (
+                    movement_type
+                ),
+            },
+        )
+
+        return FileResponse(
+            stream,
+            as_attachment=True,
+            filename=filename,
+            content_type="application/pdf",
+        )
+
 # ============================================================
 # CONFIGURACIÓN DE FIRMANTES - FILIACIÓN INDIVIDUAL
 # ============================================================
