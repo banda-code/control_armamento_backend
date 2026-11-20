@@ -160,7 +160,7 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.IsAuthenticated",
     ],
     "DEFAULT_PAGINATION_CLASS": (
-        "rest_framework.pagination.PageNumberPagination"
+        "config.pagination.StandardResultsSetPagination"
     ),
     "PAGE_SIZE": 25,
     "DEFAULT_THROTTLE_CLASSES": [

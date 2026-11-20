@@ -662,6 +662,31 @@ class StockMovementSerializer(
         read_only=True,
     )
 
+    personnel_name = serializers.SerializerMethodField()
+
+    personnel_tin = serializers.CharField(
+        source="personnel.tin",
+        read_only=True,
+        default="",
+    )
+
+
+    def get_personnel_name(self, obj):
+        if not obj.personnel:
+            return ""
+
+        personnel = obj.personnel
+
+        return " ".join(
+            value
+            for value in [
+                personnel.first_name,
+                personnel.paternal_last_name,
+                personnel.maternal_last_name,
+            ]
+            if value
+        )
+
     class Meta:
         model = StockMovement
 
@@ -758,6 +783,99 @@ class StockMovementSerializer(
                         "decimales."
                     )
                 }
+            )
+        
+
+        movement_type = attrs.get(
+            "movement_type"
+        )
+
+        personnel = attrs.get(
+            "personnel"
+        )
+
+        control_sheet = attrs.get(
+            "control_sheet"
+        )
+
+        errors = {}
+
+        # =================================================
+        # PERSONAL OBLIGATORIO
+        # =================================================
+
+        if movement_type in (
+            StockMovementType.OUT,
+            StockMovementType.RETURN,
+        ):
+            if not personnel:
+                errors["personnel"] = (
+                    "Debe identificar al personal "
+                    "relacionado con el movimiento."
+                )
+
+        # El personal debe estar activo y pertenecer
+        # a la misma unidad del lote.
+        if personnel and batch:
+            if not personnel.is_active:
+                errors["personnel"] = (
+                    "El personal seleccionado "
+                    "se encuentra inactivo."
+                )
+
+            elif personnel.unit_id != batch.unit_id:
+                errors["personnel"] = (
+                    "El personal seleccionado no "
+                    "pertenece a la unidad del lote."
+                )
+
+        # =================================================
+        # PLANILLA OBLIGATORIA PARA DEVOLUCIÓN
+        # =================================================
+
+        if (
+            movement_type ==
+            StockMovementType.RETURN
+            and not control_sheet
+        ):
+            errors["control_sheet"] = (
+                "Debe adjuntar la planilla de "
+                "control en formato PDF."
+            )
+
+        # =================================================
+        # SEGURIDAD DEL PDF
+        # =================================================
+
+        if control_sheet:
+            max_size = 10 * 1024 * 1024
+
+            if control_sheet.size > max_size:
+                errors["control_sheet"] = (
+                    "El archivo PDF no puede superar "
+                    "los 10 MB."
+                )
+
+            elif not control_sheet.name.lower().endswith(
+                ".pdf"
+            ):
+                errors["control_sheet"] = (
+                    "Solo se permiten archivos PDF."
+                )
+
+            else:
+                header = control_sheet.read(5)
+                control_sheet.seek(0)
+
+                if header != b"%PDF-":
+                    errors["control_sheet"] = (
+                        "El archivo adjunto no es "
+                        "un PDF válido."
+                    )
+
+        if errors:
+            raise serializers.ValidationError(
+                errors
             )
 
         return attrs

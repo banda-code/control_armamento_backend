@@ -650,6 +650,7 @@ class StockMovementViewSet(
             ),
             "unit",
             "armory",
+            "personnel",
             "created_by",
         )
         .all()
@@ -684,6 +685,10 @@ class StockMovementViewSet(
         "reason",
         "reference_document",
         "observations",
+        "personnel__tin",
+        "personnel__first_name",
+        "personnel__paternal_last_name",
+        "personnel__maternal_last_name",
     ]
 
     ordering_fields = [

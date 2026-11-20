@@ -746,6 +746,7 @@ def build_general_material_report(unit):
             "specification__material_type__name",
             "specification__name",
             "specification__caliber__name",
+            "allocation_type",
         )
         .annotate(total=Count("id"))
         .order_by(
@@ -756,10 +757,18 @@ def build_general_material_report(unit):
     )
 
     for row in serialized_rows:
-        category = (
+        base_category = (
             row["specification__material_type__category__name"]
             or "SIN CATEGORÍA"
         )
+
+        if base_category.strip().upper() == "ARMAMENTO":
+            if row["allocation_type"] == "INDIVIDUAL":
+                category = "ARMAMENTO DE DOTACIÓN INDIVIDUAL"
+            else:
+                category = "ARMAMENTO ORGÁNICO"
+        else:
+            category = base_category
 
         description = " ".join(
             value
@@ -807,12 +816,17 @@ def build_general_material_report(unit):
     )
 
     for row in quantity_rows:
-        category = (
+        base_category = (
             row[
                 "stock_material__specification__material_type__category__name"
             ]
             or "SIN CATEGORÍA"
         )
+
+        if base_category.strip().upper() == "ARMAMENTO":
+            category = "ARMAMENTO ORGÁNICO"
+        else:
+            category = base_category
 
         description = " ".join(
             value
@@ -859,12 +873,31 @@ def build_general_material_report(unit):
             }
         )
 
-    sections.sort(
-        key=lambda section: (
-            CATEGORY_ORDER.get(section["category"].upper(), 999),
-            section["category"],
+    def section_sort_key(section):
+        category = section["category"].upper()
+
+        if category == "ARMAMENTO DE DOTACIÓN INDIVIDUAL":
+            return (
+                CATEGORY_ORDER.get("ARMAMENTO", 999),
+                0,
+                category,
+            )
+
+        if category == "ARMAMENTO ORGÁNICO":
+            return (
+                CATEGORY_ORDER.get("ARMAMENTO", 999),
+                1,
+                category,
+            )
+
+        return (
+            CATEGORY_ORDER.get(category, 999),
+            0,
+            category,
         )
-    )
+
+
+    sections.sort(key=section_sort_key)
 
     return {
         "report_type": "GENERAL_MATERIAL",

@@ -903,6 +903,19 @@ class StockMovementType(models.TextChoices):
         "Ajuste negativo",
     )
 
+def stock_movement_control_sheet_path(
+    instance,
+    filename,
+):
+    """
+    No conserva el nombre original del archivo.
+    Evita colisiones y nombres manipulados.
+    """
+    return (
+        "inventory/stock_movements/"
+        f"control_sheets/{uuid.uuid4().hex}.pdf"
+    )
+
 
 class StockMovement(TimeStampedModel):
     """
@@ -969,6 +982,23 @@ class StockMovement(TimeStampedModel):
         related_name="stock_movements",
         editable=False,
         verbose_name="Armería o depósito",
+    )
+
+    personnel = models.ForeignKey(
+        "personnel.Personnel",
+        on_delete=models.PROTECT,
+        related_name="stock_movements",
+        null=True,
+        blank=True,
+        verbose_name="Personal relacionado",
+    )
+
+    control_sheet = models.FileField(
+        upload_to=stock_movement_control_sheet_path,
+        null=True,
+        blank=True,
+        max_length=255,
+        verbose_name="Planilla de control",
     )
 
     reason = models.CharField(
